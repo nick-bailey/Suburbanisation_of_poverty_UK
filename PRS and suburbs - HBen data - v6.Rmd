@@ -1,0 +1,1578 @@
+---
+title:  "PRS and Suburbanisation of Poverty - HBen data - v6"
+author: "Nick Bailey"
+date:   "07/01/2022"
+output:
+  html_document: 
+    code_folding: hide
+---
+
+# The re-growth of the PRS and the suburbanisation of poverty
+
+This is part of the work on how housing and welfare policy may have contributed to the suburbanisation of poverty in UK cities. It looks at the spatial distribution of private and social rented sectors, the distribution of HB-claiming households within them, and the shifts over time in HB claims in private and social rented sectors. 
+
+Data is at the level of (2011-based) LSOAs. Most of the analysis is at the level of TTWAs. Shifts over time are compared with population estimates for each year since there are no annual estimate of household numbers at LSOA level. 
+
+Various approaches to measuring centrality are used but the main one is a modified form of Zhang and Pryce's method ('dist2') which takes account of proximity to the main centre and to the nearest sub-centre (which may also be the main centre). 
+
+
+```{r setup}
+# knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# load packages
+pacman::p_load(feather, here, sf, tidyverse, readxl, ggrepel, GGally, ggridges)
+
+
+## colour palettes - http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+# To use for fills, add   scale_fill_manual(values=cbPalette)
+# # To use for line and point colors, add  scale_colour_manual(values=cbPalette)
+# The palette with grey:
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+
+```
+
+
+# Data
+
+Merge together: 
+
+* HBen dataset for 2011 LSOAs from StatXplore (created by separate Rmd);
+* LSOA distance from TTWA centres and sub-centres from Zhang & Pryce from GitHub;
+* population data for LSOAs for 2011-20 from Small Area Population Estimates (created by separate Rmd); 
+* LSOA areas from UK/Scot Govt boundary data; and
+* housing tenure from 2011 Census.
+
+Also creates TTWA-level variables including population and size bands. 
+
+
+```{r data hben}
+
+## HBen data
+# load HBen data created by earlier process from .feather
+df_hb11_read <- read_feather(here("data", "HB_UC_LSOA_2011_2021.feather"))
+
+# aggregate HB and UC claims to give single count for each tenure/lsoa/year
+df_hb11 <- df_hb11_read %>% 
+  filter(tenure != "Unknown") %>% 
+  mutate(tenure = case_when(tenure == "Social" ~ "social", 
+                            tenure == "Private" ~ "private")) %>% 
+  group_by(lsoa_code, year, tenure) %>% 
+  summarise(claimants = sum(claimants))
+
+```
+
+
+```{r data ttwa}
+
+## LSOA-TTWA-centres lookup - Meng Le Zhang github
+df_ttwa_read <- read_csv("https://raw.githubusercontent.com/MengLeZhang/decentralisationPaper2/master/Saved%20generated%20data/Distance%20from%20nearest%20centre%20for%20zones%20and%20TTWA%20lkp.csv")
+
+# filter to 2011 zones
+df_ttwa_lookup <- df_ttwa_read %>% 
+  filter(zone_type == "lsoa11" | zone_type == "dz11") %>% 
+  rename(lsoa_code = zone)
+
+# add TTWA info to hb11
+df_hb11 <- df_hb11 %>% 
+  left_join(df_ttwa_lookup, by = "lsoa_code")
+```
+
+
+```{r data popln}
+
+## population data
+# - created by separate Markdown doc from 
+#   UK and Scot Govt small area popln estimates (SAPEs)
+df_pop <- read_csv(here("data_input", "lsoa_dz_popln_2011_2020.csv"))
+
+# add popln to main file 
+df_hb11 <- df_hb11 %>% 
+  left_join(df_pop, by = c("lsoa_code", "year")) 
+
+
+## make ttwa popln & size band
+temp1 <- df_hb11 %>%
+  filter(year == 2020 & tenure == "social") %>%  # use most recent popln
+  group_by(ttwa11cd) %>%
+  summarise(ttwa_popln = sum(popln))
+
+# # ttwa size distribution
+# temp1 %>%
+#   ggplot(aes(x = ttwa_popln)) +
+#   scale_x_log10() +
+#   geom_histogram()
+
+# ttwa size bands
+temp1 <- temp1 %>%
+  mutate(ttwa_size = factor(case_when(ttwa_popln <  100000 ~ 1,
+                                      ttwa_popln <  250000 ~ 2,
+                                      ttwa_popln <  750000 ~ 3,
+                                      ttwa_popln < 1500000 ~ 4,
+                                      TRUE ~ 5),
+                           labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+")))
+
+# # check on size groups
+# table(temp1$ttwa_size)
+
+# attach ttwa popln and popln size bands to hb data
+df_hb11 <- df_hb11 %>% 
+  left_join(temp1, by = "ttwa11cd")
+
+```
+
+
+```{r data Census tenure}
+
+## tenure data - 2011 Census
+# England/Wales downloaded from: https://www.nomisweb.co.uk/census/2011/qs405ew
+df_tenure_ew <- read_csv(here("data_input", "census11", "QS405EW.csv")) %>% 
+  select(lsoa_code = `geography code`, 
+         hhlds = `Tenure: All categories: Tenure; measures: Value`,
+         ten_own = `Tenure: Owned: Total; measures: Value`,
+         ten_soc = `Tenure: Social rented: Total; measures: Value`,
+         ten_priv = `Tenure: Private rented: Total; measures: Value`, 
+         ten_priv_tied = `Tenure: Private rented: Employer of a household member; measures: Value`) %>% 
+  mutate(ten_other = hhlds - ten_own - ten_soc - ten_priv, # rent free + shared
+         ten_priv = ten_priv - ten_priv_tied, # exclude tied accomm
+         ten_other_pct = ten_other/hhlds) 
+
+# # check ten_other_pct - mean 2%; 3rd quartile 2.6%  
+# summary(df_tenure_ew$ten_other_pct)
+
+# Scotland downloaded from: https://www.scotlandscensus.gov.uk/documents/2011-census-table-data-sns-data-zone-2011/
+df_tenure_sc <- read_csv(here("data_input", "census11", "QS405SC.csv")) %>% 
+  select(
+         lsoa_code = `...1`, # reads differently on diff versions so comment out as necessary
+         # lsoa_code = `X1`, # reads differently on diff versions so comment out as necessary
+         hhlds = `All households`,
+         ten_own = `Owned`,
+         ten_own_shared = `Owned: Shared ownership (part owned and part rented)`,
+         ten_soc = `Social rented`,
+         ten_priv = `Private rented`, 
+         ten_priv_tied = `Private rented: Employer of a household member`) %>% 
+  filter(grepl("S01", lsoa_code)) %>%         # remove Scotland line
+  mutate(ten_own = ten_own - ten_own_shared,  # so same basis as EW
+         ten_other = hhlds - ten_own - ten_soc - ten_priv, # rent free + shared
+         ten_priv = ten_priv - ten_priv_tied, # exclude tied accomm
+         ten_other_pct = ten_other/hhlds) %>% 
+  select(- ten_own_shared)
+
+# # check ten_other_pct - mean 1.7%; 3rd quartile 2.1%  
+# summary(df_tenure_sc$ten_other_pct)
+
+# combine - N = 41,729 LSOAs
+df_tenure <- df_tenure_ew %>% 
+  rbind(df_tenure_sc) %>% 
+  select(lsoa_code, hhlds, ten_soc, ten_priv)
+
+# add tenure data to hb data
+df_hb11 <- df_hb11 %>% 
+  left_join(df_tenure, by = "lsoa_code")
+```
+
+
+```{r data density}
+
+## LSOA/DZ areas - for density
+# - NB these are for clipped boundaries 
+# LSOA from: https://geoportal.statistics.gov.uk/datasets/lower-layer-super-output-areas-december-2011-boundaries-full-clipped-bfc-ew-v3/
+df_area_ew <- read_csv(here("data_input", "lsoa11",
+                              "Lower_Layer_Super_Output_Areas__December_2011__Boundaries_Full_Clipped__BFC__EW_V3.csv")) %>% 
+  select(lsoa_code = LSOA11CD, 
+         area = Shape__Area)
+
+# DZ from: https://data.gov.uk/dataset/ab9f1f20-3b7f-4efa-9bd2-239acf63b540/data-zone-boundaries-2011
+df_area_sc <- st_read(here("data_input", "dz11", "SG_DataZone_Bdry_2011.shp")) %>% 
+  as.data.frame() %>% 
+  select(lsoa_code = DataZone, 
+         area = Shape_Area)
+
+# combine - N = 41,729
+df_area <- df_area_ew %>% 
+  rbind(df_area_sc)
+
+# # histogram of area to check
+# df_area %>% 
+#   ggplot(aes(x = area)) + geom_histogram() + scale_x_log10()
+
+# add area to hb data and make hhld density (hhlds per sq km)
+df_hb11 <- df_hb11 %>% 
+  left_join(df_area, by = "lsoa_code") %>% 
+  mutate(density_hh = 1000000 * hhlds/area) 
+
+
+# # exploring whether it matters using hh or pop for density - NO
+# df_hb11 <- df_hb11 %>% 
+#   mutate(density_pop = 1000000 * popln/area)
+# 
+# # correlation of density by hhlds and by popln - v high
+# df_hb11 %>%
+#   filter(year == 2011 & tenure == 'social') %>%
+#   group_by(ttwa11cd) %>% 
+#   summarise(corr = cor(density_hh, density_pop), 
+#             ttwa_size = first(ttwa_size)) %>% 
+#   ggplot(aes(x = reorder(ttwa11cd, corr), y = corr)) +
+#   geom_bar(stat = "identity") +
+#   labs(title = "Correlation betwn distance to nearest (sub-)centre & density for TTWAs") +
+#   facet_wrap(~ ttwa_size) + 
+#   theme_minimal() +
+#   theme(axis.title.x=element_blank(),
+#         axis.text.x=element_blank(),
+#         axis.ticks.x=element_blank())
+
+
+## combine density and distance to nearest (sub-)centre
+temp1 <- df_hb11 %>%
+  ungroup() %>% 
+  filter(year == 2011 & tenure == 'social') %>%
+  select(lsoa_code, ttwa11cd, main_dist, nearest_dist, density_hh) %>% 
+  group_by(ttwa11cd) %>%
+  mutate(rank_dist_main = rank(main_dist, 
+                               ties.method = "first"), 
+         rank_dist_near = rank(nearest_dist, 
+                               ties.method = "first"), 
+         rank_dens = rank(-density_hh, 
+                          ties.method = "first"), # use 'first' for reproducibility
+         rank_dist2 = rank(rank_dist_main + rank_dist_near, # dist nearest & main combined
+                           ties.method = "first"),
+         rank_dd = rank(rank_dist_near + rank_dens, # dist_nearest & dens combined
+                        ties.method = "first"), 
+         rank_dd2 = rank(rank_dist_main + rank_dist_near + rank_dens, # all three
+                         ties.method = "first")) 
+
+temp2 <- temp1 %>%   
+  ungroup() %>%   # otherwise 'select' retains ttwa11cd
+  select(lsoa_code, rank_dist_main, rank_dist_near, rank_dist2, 
+         rank_dens, rank_dd, rank_dd2)
+
+# add to hb data
+df_hb11 <- df_hb11 %>% 
+  left_join(temp2, by = "lsoa_code")
+
+```
+
+
+# Centrality
+Examining the relationship between the different measures of centrality. 
+
+This version runs across all TTWAs - ungrouped.
+
+```{r centrality}
+
+df_hb11 %>% 
+  ungroup() %>% 
+  filter(year == 2011 & tenure == "social") %>% 
+  select(contains("rank_")) %>% 
+  ggpairs(title = "")
+
+
+```
+
+Explore the variation at TTWA level.
+
+```{r centrality 2}
+
+df_hb11 %>% 
+  group_by(ttwa_size, ttwa11cd) %>% 
+  filter(year == 2011 & tenure == "social") %>% 
+  select(rank_dist2, rank_dens) %>% 
+  summarise(corr = cor(rank_dist2, rank_dens)) %>% 
+  ggplot(aes(x = corr, y = ttwa_size)) +
+  geom_density_ridges(aes(fill = ttwa_size)) +
+  labs(x = "Correlation dist2 w. density ")
+
+```
+
+
+# RCI measures
+Make RCI measures for each TTWA/year. Multiple measures are made: 
+
+* comparing PRS and SRS households in 2011 Census to each other and to all households;
+* comparing HB claims for PRS and SRS in 2011 to households in each tenure in that year; 
+* comparing HB claims for PRS and SRS from 2011-2019 to each other and to population in the relevant year; 
+* comparing population in each year to that in 2011. 
+
+
+Different versions of each set of measures are made: 
+
+* dist: using distance to nearest (sub-)centre, following Zhang and Pryce; 
+* dens: using density (households per sq km); 
+* dd: using distance and density combined; 
+* dist2: using distance to main centre combined with distance to nearest sub-centre;
+* dd2: using all three. 
+
+
+## RCI function
+This function produces the set of RCI measures, using the specified measure of 'centrality'.
+
+```{r rci fn}
+
+# fn to make range of RCI measures
+# sort_order = 1 - sort ascending
+# sort_order = 2 - sort descending (e.g. density)
+# -  redundant now using ranks for everything
+
+fn_rci <- function(centrality_var, sort_order = 1) {
+  
+  # - pivot so tenure data side by side
+  # - group by year and ttw, make % of hhld/pop/tenure/HB claims in LSOA 
+  # - make cumulative % and lag using 'centrality_var'
+  # - make rci component for each LSOA (missing for first LSOA as required), then sum
+  # - pivot back to long format - ttwa x year x rci_type
+  df_out <- df_hb11 %>% 
+    pivot_wider(names_from = tenure, values_from = claimants) %>% 
+    group_by(ttwa11cd, lsoa_code) %>%      #
+    arrange(ttwa11cd, lsoa_code, year) %>% #
+    mutate(popln_11  = first(popln)) %>%   # lsoa popln in 2011
+    group_by(year, ttwa11cd, ttwa11nm) %>% 
+    mutate(hben = social + private, 
+           social_pct = social/sum(social), 
+           private_pct= private/sum(private), 
+           hben_pct   = hben/sum(hben),
+           popln_pct  = popln/sum(popln), 
+           popln_11_pct  = popln_11/sum(popln_11), 
+           hhlds_pct  = hhlds/sum(hhlds), 
+           ten_soc_pct= ten_soc/sum(ten_soc), 
+           ten_priv_pct= ten_priv/sum(ten_priv)) 
+  
+  # for reasons I don't understand, 'arrange' not working so use 'order'
+  if (sort_order == 1) { 
+    df_out <- df_out[order(df_out$year, df_out$ttwa11cd, df_out[[centrality_var]]), ]
+  } else if (sort_order == 2) {
+    df_out <- df_out[order(df_out$year, df_out$ttwa11cd, -df_out[[centrality_var]]), ]
+  }
+  
+  # df_out <- df_out %>% 
+  #   arrange(year, ttwa11cd, centrality_var) 
+  
+  df_out <- df_out %>%
+  mutate(social_cum  = cumsum(social_pct),
+         private_cum = cumsum(private_pct),
+         hben_cum    = cumsum(hben_pct),
+         popln_cum   = cumsum(popln_pct),
+         popln_11_cum= cumsum(popln_11_pct),
+         hhlds_cum   = cumsum(hhlds_pct),
+         ten_soc_cum = cumsum(ten_soc_pct),
+         ten_priv_cum= cumsum(ten_priv_pct),
+         social_cum_lag  = lag(social_cum),
+         private_cum_lag = lag(private_cum),
+         hben_cum_lag    = lag(hben_cum),
+         popln_cum_lag   = lag(popln_cum),
+         popln_11_cum_lag= lag(popln_11_cum),
+         hhlds_cum_lag   = lag(hhlds_cum),
+         ten_soc_cum_lag = lag(ten_soc_cum),
+         ten_priv_cum_lag= lag(ten_priv_cum)) %>%
+  mutate(rci_priv.soc   = (private_cum_lag * social_cum) -
+           (social_cum_lag * private_cum),
+         rci_priv.hhlds = (private_cum_lag * hhlds_cum)  -
+           (hhlds_cum_lag  * private_cum),
+         rci_priv.popln = (private_cum_lag * popln_cum)  -
+           (popln_cum_lag  * private_cum),
+         rci_soc.hhlds  = (social_cum_lag  * hhlds_cum)  -
+           (hhlds_cum_lag  * social_cum),
+         rci_soc.popln  = (social_cum_lag  * popln_cum)  -
+           (popln_cum_lag  * social_cum),
+         rci_hben.hhlds = (hben_cum_lag    * hhlds_cum)  -
+           (hhlds_cum_lag  * hben_cum),
+         rci_ten_priv.ten_soc= (ten_priv_cum_lag * ten_soc_cum)  -
+           (ten_soc_cum_lag  * ten_priv_cum),
+         rci_priv.ten_priv   = (private_cum_lag  * ten_priv_cum) -
+           (ten_priv_cum_lag * private_cum),
+         rci_soc.ten_soc     = (social_cum_lag   * ten_soc_cum)  -
+           (ten_soc_cum_lag  * social_cum),
+         rci_ten_priv.hhlds  = (ten_priv_cum_lag * hhlds_cum)    -
+           (hhlds_cum_lag    * ten_priv_cum),
+         rci_ten_soc.hhlds   = (ten_soc_cum_lag  * hhlds_cum)    -
+           (hhlds_cum_lag    * ten_soc_cum), 
+         rci_popln.popln_11  = (popln_cum_lag * popln_11_cum)    - 
+           (popln_11_cum_lag * popln_cum))  %>%
+  summarise(ttwa_social  = sum(social, na.rm = TRUE),
+            ttwa_private = sum(private, na.rm = TRUE),
+            ttwa_hben    = sum(hben, na.rm = TRUE),
+            ttwa_popln   = sum(popln, na.rm = TRUE),
+            ttwa_hhlds   = sum(hhlds, na.rm = TRUE),
+            rci_priv.soc   = sum(rci_priv.soc, na.rm = TRUE),
+            rci_priv.hhlds = sum(rci_priv.hhlds, na.rm = TRUE),
+            rci_priv.popln = sum(rci_priv.popln, na.rm = TRUE),
+            rci_soc.hhlds  = sum(rci_soc.hhlds, na.rm = TRUE),
+            rci_soc.popln  = sum(rci_soc.popln, na.rm = TRUE),
+            rci_hben.hhlds = sum(rci_hben.hhlds, na.rm = TRUE),
+            rci_ten_priv.ten_soc = sum(rci_ten_priv.ten_soc, na.rm = TRUE),
+            rci_priv.ten_priv = sum(rci_priv.ten_priv, na.rm = TRUE),
+            rci_soc.ten_soc = sum(rci_soc.ten_soc, na.rm = TRUE),
+            rci_ten_priv.hhlds = sum(rci_ten_priv.hhlds, na.rm = TRUE),
+            rci_ten_soc.hhlds = sum(rci_ten_soc.hhlds, na.rm = TRUE),
+            rci_popln.popln_11   = sum(rci_popln.popln_11, na.rm = TRUE),
+            ttwa_size = mean(as.numeric(ttwa_size))) %>%
+  mutate(ttwa_size = factor(ttwa_size,
+                            levels = 1:5,
+                            labels = c("<100k", "100-250k", "250-750k",
+                                       "750-1500k", "1500k+"))) %>%
+  ungroup() %>%
+  pivot_longer(cols = contains("rci_"),
+               names_to = "rci_type", names_prefix = "rci_",
+               values_to = "rci") %>%
+  arrange(ttwa11cd, rci_type, year)
+  
+  return(df_out)
+}
+
+```
+
+## Make RCI measures using various centrality measures
+ 
+
+```{r rci}
+
+# making versions of df_ttwa_ using diff centrality measures
+df_ttwa_dist  <- fn_rci("rank_dist_near")
+
+df_ttwa_dist2 <- fn_rci("rank_dist2") 
+
+df_ttwa_dd    <- fn_rci("rank_dd")
+
+df_ttwa_dd2   <- fn_rci("rank_dd2")
+
+df_ttwa_dens  <- fn_rci("rank_dens") 
+
+```
+
+
+
+### Compare RCI based on dist2 and dens
+
+```{r rci ttwa dist2 dens 1}
+
+df_ttwa_dens %>% 
+  select(ttwa11cd, year, rci_type, rci_dens = rci) %>% 
+  filter(year == 2011 & 
+           rci_type == "priv.soc") %>% 
+  left_join(df_ttwa_dist2, by = c("ttwa11cd", "year", "rci_type")) %>% 
+  rename(rci_dist2 = rci) %>% 
+  ggplot(aes(x = rci_dist2, y = rci_dens)) +
+  geom_point() +
+  geom_vline(xintercept = 0, colour = "grey40", linetype = "dashed", size = 0.5) +
+  geom_hline(yintercept = 0, colour = "grey40", linetype = "dashed", size = 0.5) +
+  labs(title = "RCI priv.soc by dist2 and density - 2011") +
+  facet_wrap(~ ttwa_size) + 
+  theme_minimal() 
+
+```
+
+
+```{r rci ttwa dist2 dens 2, fig.height=8, fig.width=6}
+
+df_ttwa_dist2 %>% 
+  select(rci_dist2 = rci) %>% 
+  cbind(df_ttwa_dens) %>% 
+  rename(rci_dens = rci) %>% 
+  filter(year == 2019 &
+           as.numeric(ttwa_size) > 1) %>% 
+  ggplot(aes(x = rci_dist2, y = rci_dens)) +
+  geom_point() +
+  geom_vline(xintercept = 0, colour = "grey40", linetype = "dashed", size = 0.5) +
+  geom_hline(yintercept = 0, colour = "grey40", linetype = "dashed", size = 0.5) +
+  labs(title = "Dist2 vs dens RCI for different RCI measures - 2019", 
+       subtitle = "TTWA popln >100k") +
+  facet_wrap(~ rci_type, ncol = 3) + 
+  theme_minimal() 
+
+
+```
+
+### Compare RCI based on different versions of centrality
+
+Comparing: dist, dens, dist_dens (dd), and dist nearest+main (dist2). 
+
+* In general, dist2 makes little difference c.w. dist BUT some places where difference is significant. 
+
+```{r rci ttwa four measures}
+
+df_ttwa_dist2 %>% 
+  select(rci_dist2 = rci) %>% 
+  cbind(df_ttwa_dd) %>% 
+  select(rci_dist2, 
+         rci_dd = rci) %>% 
+  cbind(df_ttwa_dens) %>% 
+  select(rci_dist2, 
+         rci_dd, 
+         rci_dens = rci) %>% 
+  cbind(df_ttwa_dist) %>% 
+  select(ttwa11cd,
+         ttwa_size,
+         year, 
+         rci_type,
+         rci_dist2,
+         rci_dd, 
+         rci_dens, 
+         rci_dist = rci) %>% 
+  filter(year == 2011 & 
+           rci_type == "priv.soc" & 
+           as.numeric(ttwa_size) > 1) %>% 
+  select(rci_dist, rci_dens, rci_dd, rci_dist2) %>% 
+  ggpairs(title = "")
+
+```
+
+Differences in RCI using dist and dist2 (selecting ten_priv.ten_soc in 2011 as basis here):
+
+* with smaller TTWAs, some very substantial differences
+* with largest, bi-modal distribution - even tho' diffs not as big as smaller TTWAs, still substantial given scale of changes over time we are looking at. As next table shows, it is Birmingham and Mcr that have the negative differences and Slough positive (London neutral).
+
+```{r rci ttwa dist dist2}
+
+df_ttwa_dist2 %>% 
+  select(rci_dist2 = rci) %>% 
+  cbind(df_ttwa_dist) %>% 
+  select(ttwa11cd,
+         ttwa11nm,
+         ttwa_size,
+         year, 
+         rci_type,
+         rci_dist2,
+         rci_dist = rci) %>% 
+  filter(year == 2011 & 
+           rci_type == "ten_priv.ten_soc" & 
+           as.numeric(ttwa_size) > 1) %>% 
+  select(-year, -rci_type) %>% 
+  mutate(rci_diff = rci_dist - rci_dist2) %>% 
+  # mutate(rci_diff = round((rci_dist - rci_dist2), 2)) %>% 
+  arrange(rci_diff) %>% 
+  ggplot(aes(x = rci_diff, y = ttwa_size)) +
+  geom_density_ridges(aes(fill = ttwa_size)) +
+  labs(x = "Diff in RCI using nearest & using nearest+main")
+
+```
+
+
+```{r rci ttwa dist dist2 large}
+
+df_ttwa_dist2 %>% 
+  select(rci_dist2 = rci) %>% 
+  cbind(df_ttwa_dist) %>% 
+  select(ttwa11cd,
+         ttwa11nm,
+         ttwa_size,
+         year, 
+         rci_type,
+         rci_dist2, 
+         rci_dist = rci) %>% 
+  filter(year == 2011 & 
+           rci_type == "ten_priv.ten_soc" & 
+           as.numeric(ttwa_size) == 5) %>% 
+  select(-year, -rci_type) %>% 
+  mutate(rci_diff = round((rci_dist - rci_dist2), 2)) %>% 
+  arrange(rci_diff) 
+
+```
+
+
+```{r rci ttwa diffs more}
+
+df_ttwa_dist2 %>% 
+  select(rci_dist2 = rci) %>% 
+  cbind(df_ttwa_dens) %>% 
+  select(rci_dist2, 
+         rci_dens = rci) %>% 
+  cbind(df_ttwa_dist) %>% 
+  select(ttwa11cd,
+         ttwa_size,
+         year, 
+         rci_type,
+         rci_dist2, 
+         rci_dens, 
+         rci_dist = rci) %>% 
+  filter(year == 2011 & 
+           rci_type == "priv.soc") %>% 
+  pivot_longer(cols = c("rci_dist", "rci_dens"), 
+                        names_to = "rci_alt_type", 
+                        values_to = "rci_alt") %>% 
+  ggplot(aes(x = rci_dist2, y = rci_alt, group = rci_alt_type)) +
+  geom_point(aes(colour = rci_alt_type)) +
+  geom_vline(xintercept = 0, colour = "grey40", linetype = "dashed", size = 0.5) +
+  geom_hline(yintercept = 0, colour = "grey40", linetype = "dashed", size = 0.5) +
+  labs(title = "RCI.dist2 vs RCI.dist & RCI.dens for HB claims (PRS vs SRS) - 2011") +
+  facet_wrap(~ ttwa_size) + 
+  theme_minimal() 
+
+```
+
+
+
+
+## Initial exploration
+
+Look at change over time in number of HB claims, by tenure. Little change. 
+
+```{r summary tenure 11 19}
+
+# claims in 2011 & 2019
+df_hb11_read %>% 
+  filter(year == 2011 | year == 2019) %>% 
+  group_by(year, tenure) %>% 
+  summarise(claimants = sum(claimants))
+
+```
+
+Proportion of households receiving HB by tenure in 2011 - SRS 71%, PRS 37%. 
+
+```{r summary uk tenure 11}
+
+# % srs and prs with HB claims in 2011
+df_hb11 %>% 
+  ungroup() %>% 
+  filter(year == 2011) %>% 
+  pivot_wider(names_from = "tenure", values_from = "claimants") %>% 
+  summarise(ten_priv2 = sum(ten_priv), 
+            ten_soc2 = sum(ten_soc), 
+            private_HB = sum(private),
+            social_HB = sum(social),
+            priv_pct = 100 * sum(private)/sum(ten_priv), 
+            soc_pct = 100 * sum(social)/sum(ten_soc), 
+            popln = sum(popln), 
+            hhlds = sum(hhlds)) %>% 
+  pivot_longer(cols = contains("_pct"), names_to = "tenure", values_to = "hb_pct") 
+
+
+```
+
+Annual number of claims by benefit (HB vs UC). Shows how important UC becomes in these data. 
+
+```{r summary hb uc}
+
+# plot nos claimed by benefit 
+# - use _read file as still has breakdown by benefit
+df_hb11_read %>% 
+  group_by(year, benefit) %>% 
+  summarise(claimants = sum(claimants)) %>% 
+  ggplot(aes(x = factor(year), y = claimants)) +
+  geom_bar(aes(fill = benefit), stat = "identity")
+
+```
+
+Number of (2011-based) LSOAs for which we have data in each year. Data available consistently for 41,576 LSOAs.  
+
+```{r summary lsoa nos}
+
+# nos LSOAs by year 
+df_hb11_read %>% 
+  group_by(year) %>% 
+  summarise(n = n_distinct(lsoa_code))
+
+```
+
+
+### Popln vs hhlds check
+
+Comparison of using hhlds (2011) or popln (2020) as basis for RCI calculations. 
+
+```{r popln vs hhlds, fig.height=6, fig.width=6}
+
+temp1 <- df_ttwa_dd %>% 
+  filter(as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("priv.popln", "soc.popln")) %>% 
+  select(ttwa11cd, year, rci_type_pop = rci_type, rci_pop = rci) %>% 
+  mutate(tenure = case_when(str_sub(rci_type_pop, 1, 1) == "p" ~ "PRS", 
+                            str_sub(rci_type_pop, 1, 1) == "s" ~ "SRS")) %>% 
+  arrange(ttwa11cd, year, tenure)  
+  
+
+df_ttwa_dd %>% 
+  filter(as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("priv.hhlds", "soc.hhlds")) %>% 
+  mutate(tenure = case_when(str_sub(rci_type, 1, 1) == "p" ~ "PRS", 
+                            str_sub(rci_type, 1, 1) == "s" ~ "SRS")) %>% 
+  left_join(temp1, by = c("ttwa11cd", "year", "tenure")) %>% 
+  filter(year == 2011 | year == 2019) %>% 
+  ggplot(aes(x = rci, y = rci_pop)) + 
+  geom_point(aes(colour = factor(year)), alpha = .75) +
+  # geom_smooth(colour = "blue", size = 0.75, 
+  #             se = FALSE) +
+  # scale_x_log10() +
+  # geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_wrap(~ tenure) +
+  labs(title = "RCI for HB claims: hhlds vs popln base - 2011 & 2019 (dist/dens)",
+       subtitle = "TTWAs popln > 100k",
+       x = "RCI - households (2011) base", 
+       y = "RCI - population (2020) base") +
+  theme_minimal()
+
+```
+
+### Tenure structure of TTWAs 
+Share of housing in PRS/SRS in 2011 at TTWA level, against population. Larger TTWAs have more rented housing in general. 
+
+```{r summary ttwa tenure}
+
+# % srs and prs with HB claims in 2011
+df_ttwa_dist2 %>% 
+  filter(year == 2011 & rci_type == "priv.soc" &  # pick any one row
+           as.numeric(ttwa_size) > 1) %>%   
+  mutate(ten_priv_pct = 100 * ttwa_private/ttwa_hhlds, 
+         ten_soc_pct = 100 * ttwa_social/ttwa_hhlds) %>% 
+  pivot_longer(cols = c("ten_priv_pct", "ten_soc_pct"), 
+               names_to = "tenure", 
+               names_prefix = "ten_",
+               values_to = "ten_pct") %>% 
+  # arrange(desc(ten_soc_pct)) %>% 
+  ggplot(aes(x = ttwa_popln, y = ten_pct, group = tenure)) +
+  geom_point(aes(colour = tenure, shape = tenure), alpha = 0.6) +
+  geom_smooth(aes(colour = tenure), size = 0.5, linetype = "dashed",
+              se = FALSE) +
+  scale_x_log10() + 
+  labs(title = "Social and private renting vs popln - 2011 (dist/dens)",
+       subtitle = "TTWA population > 100k", 
+       x = "Population (log)", 
+       y = "Percent of hhlds") +
+  theme_minimal() 
+
+```
+
+In general, a trade-off (more SRS, less PRS) but also fair amount of spread. London an outlier with more rented housing overall. 
+
+```{r summary ttwa tenure 2}
+
+# % srs and prs with HB claims in 2011
+df_ttwa_dist2 %>% 
+  filter(year == 2011 & rci_type == "priv.soc") %>%   # pick any one row
+  mutate(ten_priv_pct = 100 * ttwa_private/ttwa_hhlds, 
+         ten_soc_pct = 100 * ttwa_social/ttwa_hhlds) %>% 
+  # arrange(desc(ten_soc_pct)) %>% 
+  ggplot(aes(x = ten_soc_pct, y = ten_priv_pct)) +
+  geom_point(aes(size = log10(ttwa_popln), colour = ttwa_size), alpha = .5) +
+  expand_limits(x = 0, y = 0) + 
+  labs(title = "Social vs private renting - 2011 Census (dist/dens)", 
+       x = "Social renting %", 
+       y = "Private renting %") +
+  theme_minimal() 
+
+
+```
+
+## Situation in 2011 
+
+
+### RCI for PRS vs SRS tenure
+
+Using 2011 Census data on tenure. In general, PRS more centralised than SRS. So greater reliance on PRS for low-income hhlds might lead to more centralisation. 
+
+```{r prs vs srs dist2}
+
+# using combined dist and density
+df_ttwa_dist2 %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type == "ten_priv.ten_soc") %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .75) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  # facet_wrap(~ rci_type) +
+  labs(title = "RCI for PRS hhlds c.w. SRS hhlds - by TTWA popln - 2011 (dist2)",
+       subtitle = "TTWAs with popln > 100k",
+       x = "TTWA population", 
+       y = "RCI") +
+  theme_minimal()
+
+```
+
+
+```{r prs vs srs dist}
+
+# using dist 
+df_ttwa_dist %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type == "ten_priv.ten_soc") %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .75) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  # facet_wrap(~ rci_type) +
+  labs(title = "RCI for PRS hhlds c.w. SRS hhlds - by TTWA popln - 2011 (dist)",
+       subtitle = "TTWAs with popln > 100k",
+       x = "TTWA population", 
+       y = "RCI") +
+  theme_minimal()
+
+```
+
+
+```{r prs vs srs dens}
+
+# using density
+df_ttwa_dens %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type == "ten_priv.ten_soc") %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .75) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  # facet_wrap(~ rci_type) +
+  labs(title = "RCI for PRS hhlds c.w. SRS hhlds - by TTWA popln - 2011 (dens)",
+       subtitle = "TTWAs with popln > 100k",
+       x = "TTWA population", 
+       y = "RCI") +
+  theme_minimal()
+
+```
+
+
+```{r prs vs srs multi dist2, fig.height=7, fig.width=6}
+
+df_ttwa_dist2 %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("ten_priv.ten_soc", "ten_priv.hhlds", "ten_soc.hhlds")) %>% 
+  mutate(rci_type = factor(rci_type, 
+                           levels = c("ten_priv.ten_soc", "ten_priv.hhlds", "ten_soc.hhlds"), 
+                           labels = c("PRS vs SRS", "PRS vs all hhlds", "SRS vs all hhlds"))) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .6) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  coord_cartesian(ylim = c(-.2, .4)) +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_wrap(~ rci_type, ncol = 1) +
+  labs(
+       title = "RCI: PRS & SRS hhlds in 2011 (dist2)",
+       subtitle = "TTWAs with popln > 100k",
+       x = "TTWA population", 
+       y = "RCI") +
+  theme_minimal()
+
+# ggsave(here("figs", "Fig - RCI PRS vs SRS 2011 dist2.tiff"), 
+#        height = 12, width = 12, units = "cm")
+
+```
+
+```{r prs vs srs multi dist, fig.height=7, fig.width=6}
+
+df_ttwa_dist %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("ten_priv.ten_soc", "ten_priv.hhlds", "ten_soc.hhlds")) %>% 
+  mutate(rci_type = factor(rci_type, 
+                           levels = c("ten_priv.ten_soc", "ten_priv.hhlds", "ten_soc.hhlds"), 
+                           labels = c("PRS vs SRS", "PRS vs all hhlds", "SRS vs all hhlds"))) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .6) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  coord_cartesian(ylim = c(-.2, .4)) +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_wrap(~ rci_type, ncol = 1) +
+  labs(
+       title = "RCI: PRS & SRS hhlds in 2011 (dist)",
+       subtitle = "TTWAs popln >100k",
+       x = "TTWA population", 
+       y = "RCI") +
+  theme_minimal()
+
+# ggsave(here("figs", "Fig - RCI PRS vs SRS 2011 dist.tiff"), 
+#        height = 12, width = 12, units = "cm")
+
+```
+
+```{r prs vs srs multi dens, fig.height=7, fig.width=6}
+
+df_ttwa_dens %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("ten_priv.ten_soc", "ten_priv.hhlds", "ten_soc.hhlds")) %>% 
+  mutate(rci_type = factor(rci_type, 
+                           levels = c("ten_priv.ten_soc", "ten_priv.hhlds", "ten_soc.hhlds"), 
+                           labels = c("PRS vs SRS", "PRS vs all hhlds", "SRS vs all hhlds"))) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .6) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  coord_cartesian(ylim = c(-.2, .4)) +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_wrap(~ rci_type, ncol = 1) +
+  labs(
+       title = "RCI: PRS & SRS hhlds in 2011 (dens)",
+       subtitle = "TTWAs popln >100k",
+       x = "TTWA population", 
+       y = "RCI") +
+  theme_minimal()
+
+# ggsave(here("figs", "Fig - RCI PRS vs SRS 2011 dens.tiff"), 
+#        height = 12, width = 12, units = "cm")
+
+```
+
+### RCI: for HB hhlds and all hhlds in tenure
+
+Comparing households on HB with all households in a given tenure (2011). 
+
+* for SRS, HB hhlds almost always *slightly more* centralised, but less so in larger TTWAs
+* for PRS, as TTWA gets larger, HB PRS hhlds tend to be *slightly less* centralised than other PRS hhlds - but also larger variations 
+
+
+```{r hb vs tenure dist2}
+
+df_ttwa_dist2 %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("priv.ten_priv", "soc.ten_soc")) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .75) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_wrap(~ rci_type) +
+  labs(title = "RCI: HB hhlds vs all in tenure - by TTWA popln - 2011 (dist2)",
+       subtitle = "TTWA popln >100k",
+       x = "TTWA population", 
+       y = "RCI") +
+  theme_minimal()
+
+```
+
+
+All three stages: 
+
+* tenure vs all hhlds: both PRS and SRS show relative centralisation with PRS slightly more centralised than SRS; suburbs have higher proportions in owner occupation
+* HB hhlds vs tenure: in SRS, HB hhlds v evenly spread but with PRS, HB hhlds tend to be a little further out in larger TTWAS which reduces the impact of tenure distribution; HB hhlds have less access to more central PRS stock in larger cities
+* hence HB vs all hhlds: v little difference overall - HB hhlds marginally more centralised with PRS than SRS. 
+
+```{r hb vs tenure dist2 2, fig.height=7, fig.width=6}
+
+# superimposed
+df_ttwa_dist2 %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("ten_priv.hhlds", "priv.ten_priv", "priv.hhlds",
+                           "ten_soc.hhlds", "soc.ten_soc", "soc.hhlds")) %>% 
+  mutate(tenure = case_when(grepl("pri", rci_type) ~ "PRS", 
+                            grepl("soc", rci_type) ~ "SRS"), 
+         type = case_when(substr(rci_type, 1, 3) == "ten" ~ "Tenure vs All Hhlds", 
+                          grepl("ten", rci_type) ~ "HB vs Tenure", 
+                          grepl("hhlds", rci_type) ~ "HB vs All Hhlds")) %>% 
+  mutate(type = factor(type, 
+                       levels = c("Tenure vs All Hhlds", "HB vs Tenure", "HB vs All Hhlds"))) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci, group = tenure)) +
+  geom_point(aes(colour = tenure), alpha = .45) +
+  geom_smooth(aes(colour = tenure), size = 0.9, linetype = "dashed", 
+              se = FALSE) +
+  scale_x_log10() +
+  scale_colour_manual(values=cbPalette) +
+  geom_hline(yintercept = 0, colour = "grey40", size = 0.5, linetype = "dashed", alpha = .5) +
+  facet_wrap( ~ type, ncol = 1) +
+  labs(
+       title = "RCI: type and tenure - TTWA popln - 2011 (dist2)",
+       subtitle = "TTWA popln >100k",
+       x = "TTWA population (log)", 
+       y = "RCI", 
+       colour = "Tenure") +
+  theme_minimal()
+
+# ggsave(here("figs", "Fig - RCI HB hhlds 2011 dist2.tiff"),
+#        height = 12, width = 14, units = "cm")
+
+```
+
+
+```{r hb vs tenure dist, fig.height=6, fig.width=6}
+
+# superimposed
+df_ttwa_dist %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("ten_priv.hhlds", "priv.ten_priv", "priv.hhlds",
+                           "ten_soc.hhlds", "soc.ten_soc", "soc.hhlds")) %>% 
+  mutate(tenure = case_when(grepl("pri", rci_type) ~ "PRS", 
+                            grepl("soc", rci_type) ~ "SRS"), 
+         type = case_when(substr(rci_type, 1, 3) == "ten" ~ "Tenure vs All Hhlds", 
+                          grepl("ten", rci_type) ~ "HB vs Tenure", 
+                          grepl("hhlds", rci_type) ~ "HB vs All Hhlds")) %>% 
+  mutate(type = factor(type, 
+                       levels = c("Tenure vs All Hhlds", "HB vs Tenure", "HB vs All Hhlds"))) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci, group = tenure)) +
+  geom_point(aes(colour = tenure), alpha = .3) +
+  geom_smooth(aes(colour = tenure), size = 0.75, linetype = "dashed", 
+              se = FALSE) +
+  scale_x_log10() +
+  scale_colour_manual(values=cbPalette) +
+  geom_hline(yintercept = 0, colour = "grey40", size = 0.5, linetype = "dashed", alpha = .5) +
+  facet_wrap( ~ type, ncol = 1) +
+  labs(
+       title = "RCI: type and tenure - TTWA popln - 2011 (dist)",
+       subtitle = "TTWA popln >100k",
+       x = "TTWA population (log)", 
+       y = "RCI", 
+       colour = "Tenure") +
+  theme_minimal()
+
+# ggsave(here("figs", "Fig - RCI HB hhlds 2011 dist.tiff"), 
+#        height = 12, width = 14, units = "cm")
+
+```
+
+```{r hb vs tenure dens, fig.height=6, fig.width=6}
+
+# superimposed
+df_ttwa_dens %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("ten_priv.hhlds", "priv.ten_priv", "priv.hhlds",
+                           "ten_soc.hhlds", "soc.ten_soc", "soc.hhlds")) %>% 
+  mutate(tenure = case_when(grepl("pri", rci_type) ~ "PRS", 
+                            grepl("soc", rci_type) ~ "SRS"), 
+         type = case_when(substr(rci_type, 1, 3) == "ten" ~ "Tenure vs All Hhlds", 
+                          grepl("ten", rci_type) ~ "HB vs Tenure", 
+                          grepl("hhlds", rci_type) ~ "HB vs All Hhlds")) %>% 
+  mutate(type = factor(type, 
+                       levels = c("Tenure vs All Hhlds", "HB vs Tenure", "HB vs All Hhlds"))) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci, group = tenure)) +
+  geom_point(aes(colour = tenure), alpha = .3) +
+  geom_smooth(aes(colour = tenure), size = 0.75, linetype = "dashed", 
+              se = FALSE) +
+  scale_x_log10() +
+  scale_colour_manual(values=cbPalette) +
+  geom_hline(yintercept = 0, colour = "grey40", size = 0.5, linetype = "dashed", alpha = .5) +
+  facet_wrap( ~ type, ncol = 1) +
+  labs(
+       title = "RCI: type and tenure - TTWA popln - 2011 (dens)",
+       subtitle = "TTWA popln >100k",
+       x = "TTWA population (log)", 
+       y = "RCI", 
+       colour = "Tenure") +
+  theme_minimal()
+
+# ggsave(here("figs", "Fig - RCI HB hhlds 2011 dens.tiff"), 
+#        height = 12, width = 14, units = "cm")
+
+```
+
+
+As previous but side-by-side. 
+
+```{r hb vs tenure dist2 2, fig.height=8, fig.width=6}
+
+# side by side
+df_ttwa_dist2 %>% 
+  filter(year == 2011 & 
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("ten_priv.hhlds", "priv.ten_priv", "priv.hhlds",
+                           "ten_soc.hhlds", "soc.ten_soc", "soc.hhlds")) %>% 
+  mutate(tenure = case_when(grepl("pri", rci_type) ~ "PRS", 
+                            grepl("soc", rci_type) ~ "SRS"), 
+         type = case_when(substr(rci_type, 1, 3) == "ten" ~ "Tenure vs All Hhlds", 
+                          grepl("ten", rci_type) ~ "HB vs Tenure", 
+                          grepl("hhlds", rci_type) ~ "HB vs All Hhlds")) %>% 
+  mutate(type = factor(type, 
+                       levels = c("Tenure vs All Hhlds", "HB vs Tenure", "HB vs All Hhlds"))) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = cbPalette[1], alpha = .75) +
+  geom_smooth(colour = cbPalette[6], size = 0.9, 
+              se = FALSE) +
+  scale_x_log10() +
+  geom_hline(yintercept = 0, colour = "darkgrey", size = 0.5, linetype = "dashed") +
+  facet_grid(type ~ tenure) +
+  labs(# title = "RCI: HB vs all hhlds in tenure - by TTWA popln - 2011 (dist2)",
+       # subtitle = "TTWA popln >100k",
+       x = "\nTTWA population (log)", 
+       y = "RCI\n") +
+    theme_minimal()
+
+# PAPERFIG 4
+ggsave(here("figs", "Fig 4 resub.jpg"),
+       height = 20, width = 15, units = "cm", dpi = 600)
+
+```
+
+
+
+## RCI by TTWA popln (2011)
+
+hben.pop: In all but the smallest TTWAs, HB claims are more centralised than the population as a whole with few exceptions. Supports view that poverty is relatively centralised, with suburbs more affluent and more dominated by home ownership. Good basis for dropping TTWAs with population below 100k. 
+
+priv.soc: Again leaving aside the smallest TTWAs, PRS HB claims tend to be more centralised that SRS HB claims but there is more of a mixed picture here. London (the largest) a bit of an exception here, perhaps reflecting the extreme pressures on the housing market there. 
+
+
+```{r rci popln, fig.height=4, fig.width=7}
+
+df_ttwa_dist2 %>% 
+  filter(year == 2011 &
+           as.numeric(ttwa_size) > 1 &
+           rci_type %in% c("hben.hhlds", "priv.soc")) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .75) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_wrap(~ rci_type) +
+  labs(title = "RCI vs TTWA population - 2011 (dist2)", 
+       x = "TTWA population") +
+  theme_minimal()
+
+```
+
+## Matrix plot
+
+By dist2. 
+
+```{r rci scatter dist2, fig.height=15, fig.width=15}
+
+df_ttwa_dist2 %>% 
+  filter(year == 2011) %>% 
+  pivot_wider(names_from = "rci_type", 
+               names_prefix = "rci_", 
+               values_from = "rci") %>% 
+  select(contains("rci_")) %>% 
+  ggpairs(title = "")
+
+```
+
+By distance. 
+
+```{r rci scatter dist, fig.height=15, fig.width=15}
+
+df_ttwa_dist %>% 
+  filter(year == 2011) %>% 
+  pivot_wider(names_from = "rci_type", 
+               names_prefix = "rci_", 
+               values_from = "rci") %>% 
+  select(contains("rci_")) %>% 
+  ggpairs(title = "")
+
+```
+
+By density.  
+
+```{r rci scatter dens, fig.height=15, fig.width=15}
+
+df_ttwa_dens %>% 
+  filter(year == 2011) %>% 
+  pivot_wider(names_from = "rci_type", 
+               names_prefix = "rci_", 
+               values_from = "rci") %>% 
+  select(contains("rci_")) %>% 
+  ggpairs(title = "")
+
+```
+
+
+## RCI change over time
+
+### Starting point - 2011
+PRS HB and SRS HB relative to population in 2011. 
+
+```{r rci popln 2, fig.height=4, fig.width=7}
+
+df_ttwa_dist2 %>% 
+  filter(year == 2011 &
+           rci_type %in% c("priv.hhlds", "soc.hhlds")) %>% 
+  ggplot(aes(x = ttwa_popln, y = rci)) +
+  geom_point(colour = "grey20", alpha = .75) +
+  geom_smooth(colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_log10() +
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_wrap(~ rci_type) +
+  labs(title = "RCI vs TTWA population - 2011 (dist2)", 
+       x = "TTWA population") +
+  theme_minimal()
+
+```
+
+
+## PRS vs SRS HBen claims
+
+By dist/dens. 
+From 2011-19, PRS HB claims decentralised wrt to SRS HB claims. So the reliance on PRS for low income hhlds, combined with constraints on HB rents, pushed low income hhlds outwards. 
+
+```{r rci priv.soc change dist2, fig.height=6, fig.width=6}
+
+df_ttwa_dist2 %>% 
+  filter(ttwa_popln > 100000 & 
+           rci_type == "priv.soc" & 
+           year <= 2019) %>% 
+  arrange(ttwa11cd, year) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(rci_rel = rci - first(rci)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = year, y = rci_rel, group = ttwa11cd)) +
+  geom_line(colour = cbPalette[1], size = 0.5, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "grey40", size = 0.5, linetype = "dashed") +
+  geom_smooth(aes(group = ttwa_size), 
+              colour = cbPalette[6], size = 0.9, 
+              se = FALSE) +
+  scale_x_continuous(breaks = seq(2011, 2019, 2), 
+                     minor_breaks = NULL) +
+  facet_wrap(~ ttwa_size) +
+  theme(legend.position = "none") +
+  labs(title = "Change in RCI for PRS HB vs SRS HB - 2011-19 (dist2)", 
+       subtitle = "TTWA popln >100k", 
+       x = "",
+       y = "Change in RCI\n") + 
+  theme_minimal() 
+
+# ggsave(here("figs", "Fig - RCI change PRS vs SRS dist2.tiff"), 
+#        height = 12, width = 14, units = "cm")
+
+```
+
+By distance. 
+```{r rci priv.soc change dist, fig.height=6, fig.width=6}
+
+df_ttwa_dist %>% 
+  filter(ttwa_popln > 100000 & 
+           rci_type == "priv.soc" & 
+           year <= 2019) %>% 
+  arrange(ttwa11cd, year) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(rci_rel = rci - first(rci)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = year, y = rci_rel, group = ttwa11cd)) +
+  geom_line(colour = cbPalette[1], size = 0.5, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "grey40", size = 0.5, linetype = "dashed") +
+  geom_smooth(aes(group = ttwa_size), 
+              colour = cbPalette[6], size = 0.9, 
+              se = FALSE) +
+  scale_x_continuous(breaks = seq(2011, 2019, 2), 
+                     minor_breaks = NULL) +
+  facet_wrap(~ ttwa_size) +
+  theme(legend.position = "none") +
+  labs(title = "Change in RCI for PRS HB vs SRS HB - 2011-19 dist", 
+       subtitle = "TTWA popln >100k", 
+       x = "",
+       y = "Change in RCI") + 
+  theme_minimal() 
+
+# ggsave(here("figs", "Fig - RCI change PRS vs SRS dist.tiff"), 
+#        height = 12, width = 14, units = "cm")
+
+```
+
+By density. 
+
+```{r rci priv.soc change dens, fig.height=6, fig.width=6}
+
+df_ttwa_dens %>% 
+  filter(ttwa_popln > 100000 & 
+           rci_type == "priv.soc" & 
+           year <= 2019) %>% 
+  arrange(ttwa11cd, year) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(rci_rel = rci - first(rci)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = year, y = rci_rel, group = ttwa11cd)) +
+  geom_line(colour = cbPalette[1], size = 0.5, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "grey40", size = 0.5, linetype = "dashed") +
+  geom_smooth(aes(group = ttwa_size), 
+              colour = cbPalette[6], size = 0.9, 
+              se = FALSE) +
+  scale_x_continuous(breaks = seq(2011, 2019, 2), 
+                     minor_breaks = NULL) +
+  facet_wrap(~ ttwa_size) +
+  theme(legend.position = "none") +
+  labs(title = "Change in RCI for PRS HB vs SRS HB - 2011-19 dens", 
+       subtitle = "TTWA popln >100k", 
+       x = "",
+       y = "Change in RCI") + 
+  theme_minimal() 
+
+# ggsave(here("figs", "Fig - RCI change PRS vs SRS dens.tiff"), 
+#        height = 12, width = 14, units = "cm")
+
+```
+
+Decomposing the change for HB households in PRS and SRS by looking at: 
+
+* SRS vs all hhlds: very little change in general - some increase in centralisation in largest cities
+* PRS vs all hhlds: decentralisation in all, esp. largest
+* hence PRS vs SRS: hence PRS decentralising wrt to SRS, v largely down to impacts on PRS
+
+
+```{r rci priv.soc change 2 dist2, fig.height=8, fig.width=7}
+
+df_ttwa_dist2 %>% 
+  filter(as.numeric(ttwa_size) > 1 & 
+           rci_type %in% c("priv.soc", "priv.popln", "soc.popln", "popln.popln_11") & 
+           year <= 2019) %>% 
+  mutate(tenure = case_when(rci_type == "priv.soc" ~ "PRS HB v SRS HB",
+                            rci_type == "priv.popln" ~ "PRS HB v popln",
+                            rci_type == "soc.popln" ~ "SRS HB v popln",
+                            rci_type == "popln.popln_11" ~ "Popln v 2011")) %>%
+  mutate(tenure = factor(tenure,
+                         levels = c("PRS HB v SRS HB", 
+                                    "PRS HB v popln", 
+                                    "SRS HB v popln", 
+                                    "Popln v 2011"))) %>%
+  arrange(ttwa11cd, tenure, year) %>% 
+  group_by(ttwa11cd, tenure) %>% 
+  mutate(rci_rel = rci - first(rci)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = year, y = rci_rel, group = ttwa11cd)) +
+  geom_line(colour = cbPalette[1], size = 0.5, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "grey40", size = 0.5, linetype = "dashed") +
+  geom_smooth(aes(group = ttwa_size), 
+              colour = cbPalette[6], size = 0.9, 
+              se = FALSE) +
+  coord_cartesian(ylim = c(-.06, .06)) +
+  scale_x_continuous(breaks = seq(2011, 2019, 2), 
+                     minor_breaks = NULL) +
+  scale_y_continuous(breaks = seq(-.06, .06, .02), 
+                     minor_breaks = NULL) +
+  facet_grid(tenure ~ ttwa_size) +
+  theme(legend.position = "none") +
+  labs(# title = "Change in RCI: HB hhlds by tenure and population - 2011-19 (dist2)", 
+       # subtitle = "TTWA popln >100k", 
+       x = "", 
+       y = "Change in RCI\n") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.35))
+
+# PAPERFIG 5
+ggsave(here("figs", "Fig 5 resub.jpg"),
+       height = 18, width = 16, units = "cm", dpi = 600)
+
+```
+
+Although we don't have annual data on housing tenure for LSOAs, we can look at the changing spatial distribution of the population. We use RCI for LSOA populations in each year, comparing them to LSOA populations in 2011. 
+
+We see significant centralisation of population over this time but especially in the largest TTWAs. So the relative decentralisation of both PRS and SRS HB claims is partly (wholly?) explained by the re-centralisation of the population. 
+
+```{r pop shift, fig.height=6, fig.width=6}
+
+df_ttwa_dist2 %>% 
+  filter(rci_type == "popln.popln_11" & 
+           year <= 2019 &
+           as.numeric(ttwa_size) > 1) %>% 
+  ggplot(aes(x = year, y = rci, group = ttwa11cd)) +
+  geom_line(colour = "grey40", size = 0.5, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "darkgrey", size = 0.5, linetype = "dashed") +
+  geom_smooth(aes(group = ttwa_size), 
+              colour = cbPalette[6], size = 0.9, 
+              se = FALSE) +
+  coord_cartesian(ylim = c(-.06, .06)) +
+  scale_x_continuous(breaks = seq(2011, 2019, 2), 
+                     minor_breaks = NULL) +
+  scale_y_continuous(breaks = seq(-.06, .06, .02), 
+                     minor_breaks = NULL) +
+  facet_wrap(~ ttwa_size) +
+  theme(legend.position = "none") +
+  labs(title = "Change in RCI for popln c.w popln in 2011", 
+       subtitle = "TTWA popln >100k", 
+       x = "",
+       y = "Change in RCI") + 
+  theme_minimal() 
+
+```
+
+### Centrality change - share of HB
+Responding to reviewer comment about how RCI is too abstract, so showing % of HB hhlds in central quintile start and end, by tenure.
+* limit to TTWAs with 250k+ popln
+
+
+```{r, fig.height=4, fig.width=8}
+
+temp <- df_hb11 %>% 
+  filter(ttwa_size != '<100k' & ttwa_size != '100-250k') %>% 
+  filter(year == 2011 | year == 2019) %>% 
+  mutate(tenure = case_when(tenure == "private" ~ "PRS", 
+                            tenure == "social" ~ "SRS")) %>% 
+  group_by(ttwa11cd, year) %>% 
+  mutate(quintile = trunc(5 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>% 
+  group_by(ttwa11cd, year, quintile, tenure) %>% 
+  summarise(claimants = sum(claimants)) %>% 
+  group_by(ttwa11cd, year, tenure) %>% 
+  mutate(claimant_share = 100 * claimants/sum(claimants)) %>% 
+  select(-claimants) %>% 
+  pivot_wider(values_from = 'claimant_share', names_from = 'year', names_prefix = 'share_') 
+
+temp %>% 
+  filter(quintile == 1) %>% 
+  ggplot(aes(x = share_2011, y = share_2019)) +
+  geom_point(colour = cbPalette[1], alpha = .75) +
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') +
+  facet_wrap( ~ tenure) +
+  coord_cartesian(ylim = c(0,50), xlim = c(0,50)) +
+  labs(# title = "Share of HB claims in Quintile 1",
+       x = "\nShare in 2011", 
+       y = "Share in 2019\n") +
+  theme_minimal()
+  
+
+# PAPERFIG 6
+ggsave(here("figs", "Fig 6 resub.jpg"),
+       height = 10, width = 20, units = "cm", dpi = 600)
+
+```
+
+```{r, fig.height=4, fig.width=8}
+
+temp <- df_hb11 %>% 
+  filter(ttwa_size != '<100k' & ttwa_size != '100-250k') %>% 
+  filter(year == 2011 | year == 2019) %>% 
+  mutate(tenure = case_when(tenure == "private" ~ "PRS", 
+                            tenure == "social" ~ "SRS")) %>% 
+  group_by(ttwa11cd, year) %>% 
+  mutate(quintile = trunc(5 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>% 
+  group_by(ttwa11cd, year, quintile, tenure) %>% 
+  summarise(claimants = sum(claimants)) %>% 
+  group_by(ttwa11cd, year, tenure) %>% 
+  mutate(claimant_share = 100 * claimants/sum(claimants)) %>% 
+  select(-claimants) %>% 
+  pivot_wider(values_from = 'claimant_share', names_from = 'year', names_prefix = 'share_') 
+
+temp %>% 
+  mutate(share_change = share_2019 - share_2011, 
+         share_change_pct = share_change/share_2011) %>% 
+  filter(quintile == 1) %>% 
+  ggplot(aes(x = share_change_pct)) +
+  geom_histogram()
+
+#(colour = cbPalette[1], alpha = .75) +
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') +
+  facet_wrap( ~ tenure) +
+  coord_cartesian(ylim = c(0,50), xlim = c(0,50)) +
+  labs(# title = "Share of HB claims in Quintile 1",
+       x = "\nShare in 2011", 
+       y = "Share in 2019\n") +
+  theme_minimal()
+  
+
+
+```
+
+
+### Major cities
+
+Major cities - 16 TTWAs with popln >750k: 
+
+* HB vs pop 
+* PRS vs SRS HB 
+
+
+```{r rci priv.soc hben.pop change, fig.height=6, fig.width=10}
+
+df_ttwa_dist2 %>% 
+  filter(as.numeric(ttwa_size) >= 4 & 
+           rci_type %in% c("priv.soc", "hben.hhlds") & 
+           year <= 2019) %>% 
+  arrange(ttwa11cd, rci_type, year) %>% 
+  group_by(ttwa11cd, rci_type) %>% 
+  mutate(rci_rel = rci - first(rci)) %>% 
+  mutate(ttwa_label = if_else(year == max(year), substr(ttwa11nm, 1, 4), NA_character_)) %>%
+  ggplot(aes(x = year, y = rci_rel, group = ttwa11cd, colour = ttwa11cd)) +
+  geom_point(size = 1) + 
+  geom_line(size = 0.75, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_grid(ttwa_size ~ rci_type) +
+  geom_label_repel(aes(label = ttwa_label),
+                   nudge_x = 1,
+                   direction = "both",
+                   xlim = c(2020, 2026), 
+                   force = 0.5,
+                   hjust = -.5,
+                   na.rm = TRUE,
+                   show.legend = FALSE) +
+  scale_x_continuous(limits = c(2011, 2026), 
+                     breaks = 2011:2019, 
+                     minor_breaks = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Change in RCI - 2011-19 (dist2)", 
+       subtitle = "Data from StatXplore for TTWAs >750k", 
+       x = "Year", 
+       y = "RCI (2011 = 0)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.35)) 
+
+
+```
+
+Major cities - 16 TTWAs with popln >750k: 
+
+* PRS HB vs pop 
+* SRS HB vs pop
+
+
+```{r rci priv.pop soc.pop change, fig.height=6, fig.width=10}
+
+df_ttwa_dist2 %>% 
+  filter(as.numeric(ttwa_size) >= 4 & 
+           rci_type %in% c("priv.hhlds", "soc.hhlds") & 
+           year <= 2019) %>% 
+  arrange(ttwa11cd, rci_type, year) %>% 
+  group_by(ttwa11cd, rci_type) %>% 
+  mutate(rci_rel = rci - first(rci)) %>% 
+  mutate(ttwa_label = if_else(year == max(year), substr(ttwa11nm, 1, 4), NA_character_)) %>%
+  ggplot(aes(x = year, y = rci_rel, group = ttwa11cd, colour = ttwa11cd)) +
+  geom_line(size = 0.75, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  facet_grid(ttwa_size ~ rci_type) +
+  geom_label_repel(aes(label = ttwa_label),
+                   nudge_x = 1,
+                   direction = "both",
+                   xlim = c(2020, 2026), 
+                   force = 0.5,
+                   hjust = -.5,
+                   na.rm = TRUE,
+                   show.legend = FALSE) +
+  scale_x_continuous(limits = c(2011, 2026), 
+                     breaks = 2011:2019, 
+                     minor_breaks = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "RCI: PRS & SRS HB cw all hhlds - 2011-19 (dist2)", 
+       subtitle = "Data from StatXplore for TTWAs >750k", 
+       x = "Year", 
+       y = "RCI (2011 = 0)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.35)) 
+
+
+```
+
+## HBen claims vs all hhlds
+Just for 2011-19. In general, HB claims being pushed outwards (wrt to 2011 hhlds numbers). 
+
+```{r rci hben.pop change, fig.height=8, fig.width=8}
+
+df_ttwa_dist2 %>% 
+  filter(ttwa_popln > 100000 & 
+           rci_type == "hben.hhlds" & 
+           year <= 2019) %>% 
+  arrange(ttwa11cd, year) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(rci_rel = rci - first(rci)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = year, y = rci_rel, group = ttwa11cd)) +
+  geom_line(colour = "grey40", size = 0.5, alpha = 0.6) + 
+  geom_hline(yintercept = 0, colour = "blue", size = 0.5, linetype = "dashed") +
+  geom_smooth(aes(group = ttwa_size), 
+              colour = "blue", size = 0.75, 
+              se = FALSE) +
+  scale_x_continuous(breaks = 2011:2019, 
+                     minor_breaks = NULL) +
+  facet_wrap(~ ttwa_size) + 
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Change in RCI - HB vs population - 2011-19 (dist2)", 
+       subtitle = "Data from StatXplore for TTWAs >100k, consistent LSOAs/DZs, April")
+
+```
+
+
+```{r session.info}
+
+sessionInfo()
+
+```
+

@@ -1,0 +1,1711 @@
+---
+title: "PRS and Suburbanisation of Poverty - Zoopla data v6"
+author: "Nick Bailey"
+date: '2023-08-11'
+output: html_document
+---
+
+# PRS and Suburbanisation of Poverty - Zoopla data
+Version used for resubmission of paper to Hsng Studies. Creates Figs 1-3. 
+
+Re-writing of code from Bin Chi  for resubmission of paper to Housing Studies. First half of code combines zoopla with various other data for LSOAs and TTWAs, and saves this. Summary of file structure (df_z):
+
+* Zoopla listings - contain postcode (in/outcode)
+* pcode to higher area lookup - gives LSOA and ttwa11cd/nm
+* pcode to BRMA - gives BRMA
+* LHA rates - linked thru' BRMA, year and beds, gives LHA rate and whether below LHA
+* MengLe file - linked thru' LSOA, gives centrality and decile within TTWA
+* popln data added to MengLe file gives popln size of ttwas and bands
+* merged on to zoopla data which also gives n_listings (per TTWA)
+* TTWA size and n_listings - used to select subset for further analysis
+
+Second half of file runs various analyses and models. There is a quickstart there once first half has run, using saved file. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# install.packages('knitr')
+# install.packages('here')
+# install.packages('tidyverse')
+# install.packages('tidymodels')
+
+#load package
+library(ggplot2)
+library(data.table)
+library(here)
+library(readxl)
+library(tidyverse)
+library(tidymodels)
+
+
+## colour palettes - http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+# The palette with grey:
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+
+```
+
+## Read Zoopla data
+Reading all the csv files at once using 'fread' creates probs due to size, so read in chunks and cut down to rental ads and relevant vars before combining. 
+
+```{r read zoopla}
+
+# list of csv files w. path ('data')
+files_csv <- list.files(path = "data", pattern = ".csv", all.files = FALSE,
+                       full.names = TRUE, include.dirs = TRUE, recursive = FALSE)
+
+# list of colnames
+list_vars <- colnames(fread(files_csv[1]))
+
+# list of vars to keep
+list_vars_select <- c("listing_id", "property_id",
+                      "first_marketed_date", "last_marketed_date", 
+                      "price", "property_type", "category", "num_bedrooms",
+                      "num_floors", "num_bathrooms", "num_recepts", 
+                      # "description", "short_description", "bullet_list",
+                      "outcode", "incode")
+
+
+# set max no. files in each group and hence no. to be read at one time
+length_groups <- 10
+n_groups <- ceiling(length(files_csv)/length_groups)
+
+# read data into list
+list_df <- list()
+
+for (i in 1:n_groups) {
+  
+  list_temp <- list()
+  
+  print(i)
+  
+  # list of files to read this time 
+  start <- ((i-1)*length_groups + 1)
+  end   <- min((i*length_groups), length(files_csv))
+  
+  files_temp <- files_csv[start:end]
+  # temp_files <- temp_files[!is.na(temp_files)]
+
+  # read files into temp list
+  list_temp <- lapply(files_temp, fread)
+  
+  # make first/last marketed dates all character
+  list_temp <- lapply(list_temp, function(df) mutate_at(df, vars(matches("marketed")), as.character))
+  
+  # store temp list as data frame in main list, and reduce to rental ads and key vars
+  list_df[[i]] <- bind_rows(list_temp) %>% 
+    filter(listing_status == "rent") %>%
+    select(all_of(list_vars_select))
+
+}
+
+# combine list of dfs into single df
+df_z <- bind_rows(list_df)
+
+# remove temp lists
+rm(list_df)
+rm(list_temp)
+
+# N rent records - same as Bin (4479536) 
+
+```
+
+Tidying up variables, starting with dates. 
+
+```{r year}
+
+# ### date first/last advertised
+# # first - chars = 19 or 0, with 250k of latter
+# unique(nchar(df_z$first_marketed_date))
+# sum(nchar(df_z$first_marketed_date) == 0)
+# 
+# # last - 19 or 4, with 400k of latter containing 'None'
+# unique(nchar(df_z$last_marketed_date))
+# sum(nchar(df_z$last_marketed_date) == 4)
+# unique(df_z$last_marketed_date[nchar(df_z$last_marketed_date) == 4])
+
+
+### year for first/last advertised
+df_z$year_first <- as.numeric(substr(df_z$first_marketed_date, 1, 4))
+# sum(is.na(df_z$year_first))
+df_z$year_last <- as.numeric(substr(df_z$last_marketed_date, 1, 4))
+# sum(is.na(df_z$year_last))
+
+# # no overlap in missing dates
+# table(is.na(df_z$year_first), is.na(df_z$year_last))
+# 
+# # spread of years affected but fewer as time goes on
+# table(is.na(df_z$year_first), df_z$year_last)
+# table(is.na(df_z$year_last), df_z$year_first)
+
+
+sum(is.na(df_z$year_first)|is.na(df_z$year_last))
+sum(is.na(df_z$year_first)|is.na(df_z$year_last))/nrow(df_z)
+
+# remove records with missing information on first/last marketed
+df_z<-df_z[!is.na(year_first) & !is.na(year_last),]
+
+# # 3,823,304 - v close to Bin's figure
+
+```
+
+
+```{r dates}
+
+# convert first/last to date formats - no missings
+df_z$first_marketed_date <- as.Date(substr(df_z$first_marketed_date, 1, 10))
+df_z$last_marketed_date <- as.Date(substr(df_z$last_marketed_date, 1, 10))
+
+# check first not later than last - 46,502 so drop
+sum(df_z$first_marketed_date > df_z$last_marketed_date)
+
+# reduce
+df_z <- df_z[first_marketed_date <= last_marketed_date,]
+
+# # mix/max first marketed date - 2020-03-30 and 2012-01-01
+# max(df_z$first_marketed_date)
+# min(df_z$first_marketed_date)
+
+```
+
+
+```{r year fiscal}
+
+#assign the financial year for the zoopla data - 2012 = 2012/13, etc
+df_z[, year_fiscal := ifelse(month(df_z$first_marketed_date) >= 4, year_first, 
+                             year_first-1)]
+
+sum(df_z$year_fiscal<2012|df_z$year_fiscal>2019)
+
+# extract data for  financial years 2012 to 2019
+df_z <- df_z[year_fiscal>=2012 & year_fiscal<=2019,]
+
+# Bin: dim(df_z)[1] 3644283
+
+```
+
+
+```{r price}
+
+# # some v extreme values - clear errors
+# summary(df_z$price)
+# 
+# 
+# # at bottom end, no missing values but some zeroes a v low values
+# # - £40 looks like reasonable threshold
+# sum(is.na(df_z$price))
+# sum(df_z$price == 0)
+# hist(as.numeric(df_z$price[df_z$price < 100]))
+# sum(df_z$price < 40)
+# 
+# # at top end, some clear errors and some others with v high values
+# # possibly some are sales mis-labelled as rentals
+# # - £2000 pw looks like reasonable upper limit
+# hist(as.numeric(df_z$price))
+# sum(df_z$price > 10000)
+# hist(as.numeric(df_z$price[df_z$price <= 10000]))
+# sum(df_z$price > 2000 & df_z$price <= 10000)
+# hist(as.numeric(df_z$price[df_z$price <= 2000]))
+
+
+# combined loss of cases - %
+sum((df_z$price < 40 | df_z$price > 2000)/nrow(df_z))
+
+
+# reduce
+df_z <- df_z[(price >= 40 & price <= 2000),]
+
+
+# make log of price
+df_z$price_log <- log10(df_z$price)
+  
+
+# Bin: dim(df_z)[1] 3642984
+
+
+```
+
+
+```{r beds}
+
+# # number of bedrooms - some v high values
+# table(df_z$num_bedrooms)
+# sum(df_z$num_bedrooms > 10)
+
+
+## beds: properties with 1-4 bedrooms
+df_z <- df_z %>% 
+  mutate(beds = case_when((num_bedrooms > 0 & num_bedrooms <= 4) ~ num_bedrooms)) 
+
+# 0 or 5+
+sum(df_z$num_bedrooms == 0 | df_z$num_bedrooms > 4)/nrow(df_z)
+
+
+# filter to 1-4 beds
+df_z <- df_z %>% 
+  filter(df_z$num_bedrooms > 0 & df_z$num_bedrooms <= 4)
+
+```
+
+```{r pcode}
+
+## make single var for postcode in df_z with single whitespace (pcds)
+# - remove both leading and trailing whitespace 
+df_z <- df_z %>% 
+  mutate(pcds = paste0(trimws(df_z$outcode), " ", trimws(df_z$incode))) %>% 
+  select(-outcode, -incode) 
+
+
+```
+
+
+## Geographic variables 1
+Link property to LSOA, TTWA. 
+
+```{r link higher area}
+
+# pcode to higher area lookup
+df_nspl <- fread(here("data2", "NSPL_NOV_2021_UK.csv")) 
+df_nspl <- df_nspl[ , c("pcds","lsoa11","laua","oseast1m","osnrth1m","ctry","ttwa","imd", "rgn")]
+# summary(df_nspl$pcds)
+
+
+# merge onto df_z
+df_z <- df_z %>% 
+  left_join(df_nspl, by = "pcds")
+
+# v few missing LSOA etc.
+sum(is.na(df_z$lsoa11))
+
+# tidy
+rm(df_nspl)
+
+```
+
+Link to BRMA, using pcode. 
+```{r link brma}
+
+# BRMA and LHA data location
+dir_brma <- "C:/Users/pb53b/OneDrive - University of Glasgow/Data store/BRMA/data-output"
+
+# pcode to BRMA lookup
+df_pcode_brma <- read_csv(here(dir_brma, "pcode_brma_lookup.csv")) %>% 
+  rename(pcds = PCDS)
+
+# merge onto df_z
+df_z <- df_z %>% 
+  left_join(df_pcode_brma, by = "pcds")
+
+# sum(is.na(df_z$brma))
+
+rm(df_pcode_brma)
+
+# filter non-matches
+df_z <- df_z %>% 
+  filter(!is.na(brma) & !is.na(ttwa))
+
+```
+
+Add LHA rates from lookup, using BRMA.
+
+```{r link lha}
+
+# LHA rates by BRMA, year (fiscal) and beds
+df_lha <- read_csv(here(dir_brma, "lha_rates.csv")) %>% 
+  rename(year_fiscal = year) %>% 
+  select(brma, year_fiscal, beds, lha)
+
+# merge onto df_z
+df_z <- df_z %>% 
+  left_join(df_lha, by = c("brma", "year_fiscal", "beds"))
+
+# check none missing lha rates
+sum(is.na(df_z$lha))
+
+rm(df_lha)
+
+```
+
+Make flag for properties at or below LHA rate. Some stats here but NB that recalculated for the subset of N=74 TTWAs below. 
+
+```{r lha below}
+
+# flag for rent (price) <= LHA
+df_z <- df_z %>% 
+  mutate(lowlha = (price <= lha))
+
+# % below LHA by year
+df_z %>% 
+  group_by(year_fiscal) %>% 
+  summarise(pct = sum(lowlha, na.rm = TRUE)/n()) 
+
+# fig by sizes
+df_z %>% 
+  group_by(beds, year_fiscal) %>% 
+  summarise(pct = sum(lowlha, na.rm = TRUE)/n()) %>% 
+  ggplot(aes(x = year_fiscal, y = pct, group = factor(beds))) +
+  geom_line(aes(colour = factor(beds))) 
+
+
+```
+
+
+## Geographic variables 2: TTWA info
+Get Meng Le's file with lsoa-level measures of centrality  within TTWA. 
+
+```{r lsoa ttwa}
+
+# From MengLe Zhang github (19 June 2023) "https://raw.githubusercontent.com/MengLeZhang/decentralisationPaper2/master/Saved%20generated%20data/Distance%20from%20nearest%20centre%20for%20zones%20and%20TTWA%20lkp.csv"
+df_lsoa_ttwa <- fread(here("data2", "mengle_df_ttwa_read.csv"))
+
+
+# filter to 2011 zones and rename zone to LSOA code
+df_lsoa_ttwa <- df_lsoa_ttwa %>%
+  filter(zone_type == "lsoa11" | zone_type == "dz11") %>%
+  rename(lsoa_code = zone) 
+
+
+# make 'rank_dist2', combining (rank of) dist to main centre and (rank of) dist to nearest centre
+df_lsoa_ttwa <- df_lsoa_ttwa %>%
+  group_by(ttwa11cd) %>%
+  mutate(rank_dist_main = rank(main_dist,
+                               ties.method = "first"),
+         rank_dist_near = rank(nearest_dist,
+                               ties.method = "first"),
+         rank_dist2 = rank(rank_dist_main + rank_dist_near, 
+                           ties.method = "first"))
+
+```
+
+
+Mid-year popln estimates downloaded from: 
+
+* England: https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationestimates/datasets/lowersuperoutputareamidyearpopulationestimates
+File contains this: "Source: Office for National Statistics licensed under the Open Government Licence. © Crown copyright 2021"
+
+* Scotland: https://www.nrscotland.gov.uk/statistics-and-data/statistics/statistics-by-theme/population/population-estimates/small-area-population-estimates-2011-data-zone-based/mid-2020 
+NRS general info on licencing here: https://www.nrscotland.gov.uk/copyright-and-disclaimer - "The material contained in the National Records of Scotland (NRS) web pages is covered by Crown Copyright unless otherwise indicated. Open Government Licence Information © Crown copyright, 2020." 
+
+So combined as: "Source: Office for National Statistics/National Records for Scotland licensed under the Open Government Licence. © Crown copyright 2021"
+
+```{r ttwa popln}
+# read in population data according to Nick's code
+# eng
+temp <- read_excel(here("data2", "sape23dt2mid2020lsoasyoaestimatesunformatted.xlsx"),
+                        sheet = "Mid-2020 Persons", 
+                        skip = 4) %>% 
+  select(lsoa_code = `LSOA Code`,
+         popln = `All Ages`)
+
+# scot
+temp1 <- read_csv(here("data2", "sape-20-all-tabs-and-figs_TabA.csv"),
+                        skip = 2) %>% 
+  filter(grepl("S01", DataZone2011Code)) %>% 
+  select(lsoa_code = DataZone2011Code, 
+         popln = `Total population`)
+
+# combine for GB
+temp <- temp %>% 
+  rbind(temp1)
+```
+
+
+```{r lsoa ttwa popln}
+
+## add lsoa population information back to Mengle’s file
+df_lsoa_ttwa <- df_lsoa_ttwa %>% 
+  left_join(temp, by = "lsoa_code") 
+
+##check lsoa codes are unique in the ttwa lookup
+length(unique(df_lsoa_ttwa$lsoa_code)) == nrow(df_lsoa_ttwa)
+
+
+## ttwa summaries with total population and size bands
+df_lsoa_ttwa <- df_lsoa_ttwa %>%  
+  group_by(ttwa11cd) %>% 
+  mutate(ttwa_popln = sum(popln)) %>% 
+  ungroup() %>% 
+  mutate(ttwa_size = factor(case_when(ttwa_popln <  100000 ~ 1, 
+                                      ttwa_popln <  250000 ~ 2, 
+                                      ttwa_popln <  750000 ~ 3, 
+                                      ttwa_popln < 1500000 ~ 4, 
+                                      TRUE ~ 5), 
+                            labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+")))
+
+# for each LSOA, decile by centrality on 'rank_dist2'
+df_lsoa_ttwa <- df_lsoa_ttwa %>%
+  group_by(ttwa11cd) %>%
+  arrange(rank_dist2) %>%
+  mutate(decile = ntile(cumsum(popln), 10))
+
+# reduce 
+df_lsoa_ttwa <- df_lsoa_ttwa %>%
+  select(-zone_type)
+
+```
+
+Make a df with just the TTWA info
+```{r ttwa chars}
+
+df_ttwa <- df_lsoa_ttwa %>% 
+  group_by(ttwa11cd) %>% 
+  slice(1) %>% 
+  select(ttwa11cd, ttwa11nm, ttwa_popln, ttwa_size)
+
+```
+
+
+Add TTWA info to zoopla data, and make flag for N=74 TTWAs with population >250k and >8k listings total. 
+
+```{r ttwa select}
+
+# add ttwa data to zoopla, using lsoa_code, and make flag, z74
+df_z <- df_z %>% 
+  left_join(df_lsoa_ttwa, by = c("lsoa11" = "lsoa_code")) %>% 
+  group_by(ttwa) %>% 
+  mutate(n_listing = n(), 
+         z74 = (ttwa_popln >= 250000 & n_listing >= 8000)) %>% 
+  ungroup()
+
+# # check that ttwa from pcode-higher area (ttwa) and from MengLe lsoa-ttwa lookup (ttwa11cd) are same
+# sum(df_z$ttwa != df_z$ttwa11cd)
+
+
+# check N=74
+length(unique(df_z$ttwa11cd[df_z$z74 == 1]))
+
+# proportion of adds in reduced dataset
+sum(df_z$z74)/nrow(df_z)
+
+```
+
+
+## Write
+
+```{r write}
+
+write_csv(df_z, here("data_out", "zoopla_all.csv"))
+
+
+```
+
+
+# Analysis and quick start
+
+## Read
+
+Read in saved data, make reduced version for the 74 TTWAs meeting criteria and make versions for deciles and rci measures. 
+
+regions codes/names here: https://geoportal.statistics.gov.uk/datasets/ons::regions-december-2022-names-and-codes-in-england/explore
+
+```{r read zoopla quick}
+
+# full dataset
+df_z <- read_csv(here("data_out", "zoopla_all.csv"))
+
+
+# reduced version for 74 TTWAs >250k popln/8k listings
+df_z74 <- df_z %>% 
+  filter(z74 == 1) %>% 
+  mutate(yearc = year_fiscal - 2012)   # for modelling
+
+
+# summaries by decile for each ttwa and year
+df_z74_decile <- df_z74 %>% 
+  group_by(ttwa_size, ttwa, year_fiscal, decile) %>% 
+  summarise(count = n(), 
+            lcount = sum(lowlha == 1), 
+            acount = sum(lowlha == 0), 
+            ttwa_popln = mean(ttwa_popln)) 
+
+
+# RCI measures - ttwa by year
+df_z74_rci <- df_z74_decile %>%
+  group_by(ttwa_size, ttwa, year_fiscal) %>% 
+  arrange(ttwa, year_fiscal, decile) %>% 
+  mutate(above_pct = acount/sum(acount),
+         below_pct= lcount/sum(lcount),
+         above_cum  = cumsum(above_pct),
+         below_cum = cumsum(below_pct),
+         above_cum_lag  = lag(above_cum),
+         below_cum_lag = lag(below_cum)) %>% 
+  mutate(rci = (below_cum_lag * above_cum) - (above_cum_lag * below_cum))  %>% 
+  summarise(rci = sum(rci, na.rm = TRUE), 
+            ttwa_popln = mean(ttwa_popln))
+
+
+# ttwa-level
+# NB 74 TTWAs
+df_ttwa <- df_z %>% 
+  filter(z74 == 1) %>% 
+  group_by(ttwa) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(ttwa11cd, ttwa11nm, ttwa_popln, ttwa_size)
+
+# ttwa - region fit
+temp <- df_z %>% 
+  filter(z74 == 1) %>% 
+  group_by(ttwa11cd, rgn) %>% 
+  summarise(n = n()) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(pct = n/sum(n)) %>% 
+  arrange(ttwa11cd) %>% 
+  filter(pct == max(pct)) %>% 
+  select(ttwa11cd, rgn)
+#hist(temp$pct)
+df_ttwa <- df_ttwa %>% 
+  left_join(temp, by = 'ttwa11cd') %>% 
+  mutate(rgn = factor(rgn, 
+                      levels = c("E12000001", "E12000002", "E12000003", "E12000004", "E12000005", "E12000006", 
+                                  "E12000007", "E12000008", "E12000009", "W99999999", "S99999999"),
+                      labels = c("NE", "NW", "YH", "EM", "WM", "Ea", "Lon", "SE", "SW", "Wa", "Sc")))
+# table(df_ttwa$rgn)
+       
+       
+
+# # save the rci results
+# write_csv(df_z74_rci, here("data_out", "ttwa_rci.csv"))
+
+```
+
+Make file with tenure for LSOAs, with 
+
+```{r data Census tenure}
+
+### Taken from the HBen data analysis - reading in Census 2011 tenure data for LSOA11s. This is done so we can compare distribution of zoopla ads with distribution of PRS in 2011.
+## tenure data - 2011 Census
+# England/Wales downloaded from: https://www.nomisweb.co.uk/census/2011/qs405ew
+df_tenure <- read_csv(here("data2", "census11", "QS405EW.csv")) %>% 
+  select(lsoa_code = `geography code`, 
+         hhlds = `Tenure: All categories: Tenure; measures: Value`,
+         ten_own = `Tenure: Owned: Total; measures: Value`,
+         ten_soc = `Tenure: Social rented: Total; measures: Value`,
+         ten_priv = `Tenure: Private rented: Total; measures: Value`, 
+         ten_priv_tied = `Tenure: Private rented: Employer of a household member; measures: Value`) %>% 
+  mutate(ten_other = hhlds - ten_own - ten_soc - ten_priv, # rent free + shared
+         ten_priv = ten_priv - ten_priv_tied, # exclude tied accomm
+         ten_other_pct = ten_other/hhlds) 
+
+# Scotland downloaded from: https://www.scotlandscensus.gov.uk/documents/2011-census-table-data-sns-data-zone-2011/
+temp <- read_csv(here("data2", "census11", "QS405SC.csv")) %>% 
+  select(
+         lsoa_code = `...1`, # reads differently on diff versions so comment out as necessary
+         # lsoa_code = `X1`, # reads differently on diff versions so comment out as necessary
+         hhlds = `All households`,
+         ten_own = `Owned`,
+         ten_own_shared = `Owned: Shared ownership (part owned and part rented)`,
+         ten_soc = `Social rented`,
+         ten_priv = `Private rented`, 
+         ten_priv_tied = `Private rented: Employer of a household member`) %>% 
+  filter(grepl("S01", lsoa_code)) %>%         # remove Scotland line
+  mutate(ten_own = ten_own - ten_own_shared,  # so same basis as EW
+         ten_other = hhlds - ten_own - ten_soc - ten_priv, # rent free + shared
+         ten_priv = ten_priv - ten_priv_tied, # exclude tied accomm
+         ten_other_pct = ten_other/hhlds) %>% 
+  select(- ten_own_shared)
+
+# combine - N = 41,729 LSOAs
+df_tenure <- df_tenure %>% 
+  rbind(temp) %>% 
+  select(lsoa_code, hhlds, ten_soc, ten_priv)
+
+
+### REUSED FROM ABOVE SO DONT NEED TO RUN ALL OF PREVIOUS
+### linking LSOA to TTWA and making centrality
+# From MengLe Zhang github (19 June 2023) "https://raw.githubusercontent.com/MengLeZhang/decentralisationPaper2/master/Saved%20generated%20data/Distance%20from%20nearest%20centre%20for%20zones%20and%20TTWA%20lkp.csv"
+df_lsoa_ttwa <- fread(here("data2", "mengle_df_ttwa_read.csv"))
+
+# filter to 2011 zones and rename zone to LSOA code
+df_lsoa_ttwa <- df_lsoa_ttwa %>%
+  filter(zone_type == "lsoa11" | zone_type == "dz11") %>%
+  rename(lsoa_code = zone) 
+
+# make 'rank_dist2', combining (rank of) dist to main centre and (rank of) dist to nearest centre
+# reduce to key vars
+df_lsoa_ttwa <- df_lsoa_ttwa %>%
+  group_by(ttwa11cd) %>%
+  mutate(rank_dist_main = rank(main_dist,
+                               ties.method = "first"),
+         rank_dist_near = rank(nearest_dist,
+                               ties.method = "first"),
+         rank_dist2 = rank(rank_dist_main + rank_dist_near, 
+                           ties.method = "first")) %>% 
+  select(lsoa_code, ttwa11cd, rank_dist2)
+
+# # add ttwa info - only for 74 TTWAs used in Zoopla analysis
+# df_lsoa_ttwa <- df_lsoa_ttwa %>%
+#   left_join(df_ttwa, by = "ttwa11cd")
+
+### ALSO REUSED FROM ABOVE
+# read in population data 
+# eng
+temp <- read_excel(here("data2", "sape23dt2mid2020lsoasyoaestimatesunformatted.xlsx"),
+                        sheet = "Mid-2020 Persons", 
+                        skip = 4) %>% 
+  select(lsoa_code = `LSOA Code`,
+         popln = `All Ages`)
+
+# scot
+temp1 <- read_csv(here("data2", "sape-20-all-tabs-and-figs_TabA.csv"),
+                        skip = 2) %>% 
+  filter(grepl("S01", DataZone2011Code)) %>% 
+  select(lsoa_code = DataZone2011Code, 
+         popln = `Total population`)
+
+# combine for GB
+temp <- temp %>% 
+  rbind(temp1)
+
+
+## add lsoa population information back to lsoa ttwa file
+df_lsoa_ttwa <- df_lsoa_ttwa %>% 
+  left_join(temp, by = "lsoa_code") 
+
+# ##check lsoa codes are unique in the ttwa lookup
+# length(unique(df_lsoa_ttwa$lsoa_code)) == nrow(df_lsoa_ttwa)
+
+
+## ttwa summaries with total population and size bands
+df_lsoa_ttwa <- df_lsoa_ttwa %>%  
+  group_by(ttwa11cd) %>% 
+  mutate(ttwa_popln = sum(popln)) %>% 
+  ungroup() %>% 
+  mutate(ttwa_size = factor(case_when(ttwa_popln <  100000 ~ 1, 
+                                      ttwa_popln <  250000 ~ 2, 
+                                      ttwa_popln <  750000 ~ 3, 
+                                      ttwa_popln < 1500000 ~ 4, 
+                                      TRUE ~ 5), 
+                            labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+")))
+
+# for each LSOA, decile by centrality on 'rank_dist2'
+df_lsoa_ttwa <- df_lsoa_ttwa %>%
+  group_by(ttwa11cd) %>%
+  arrange(rank_dist2) %>%
+  mutate(decile = ntile(cumsum(popln), 10))
+
+
+# merge on to tenure data - all LSOAs so N=218 TTWAs
+df_tenure <- df_tenure %>% 
+  left_join(df_lsoa_ttwa, by = "lsoa_code") 
+
+```
+
+
+
+
+## Distribution of properties by ttwa and deciles
+
+Number of ads per year in the 74 TTWAs
+
+
+```{r properties year}
+
+# n listings per year
+df_z %>% 
+  filter(z74 == 1) %>% 
+  group_by(year_fiscal) %>% 
+  summarise(n = n())
+
+```
+
+Popln of TTWA vs number of ads
+
+```{r properties ttwa}
+
+# plot ttwa popln vs n listings
+df_z %>% 
+  group_by(ttwa) %>% 
+  slice(1) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = log10(n_listing))) +
+  geom_point() +
+  geom_vline(xintercept = log10(250000), linetype = "dashed") + 
+  geom_hline(yintercept = log10(8000), linetype = "dashed")
+
+```
+For 74 TTWAS, corr between ttwa popln and listings, by year - never less than 0.97
+
+```{r properties ttwa}
+
+# plot ttwa popln vs n listings
+df_z %>% 
+  filter(z74 ==1) %>% 
+  group_by(year_fiscal, ttwa) %>% 
+  summarise(listings = n(), 
+            popln = mean(ttwa_popln)) %>% 
+  group_by(year_fiscal) %>% 
+  summarise(corr = cor(listings, popln))
+  
+
+```
+
+```{r properties decile}
+
+# plots to be added
+df_z74_decile %>% 
+  group_by(decile) %>% 
+  summarise(all = sum(count), 
+            below = sum(lcount), 
+            above = sum(acount)) %>% 
+  pivot_longer(cols = c("all", "below", "above"), 
+               names_to = "count", 
+               values_to = "number") %>% 
+  filter(count == "below" | count == "above") %>% 
+  ggplot(aes(x = decile, y = number, group = count)) +
+  geom_bar(aes(fill = count), stat = "identity")
+
+```
+
+Share of TTWA ads per decile vs share of PRS hhlds per decile - by TTWA and year.
+
+```{r ads v tenure ttwa, fig.height=15, fig.width=6}
+
+# share of PRS hhlds per decile by TTWA, decile
+temp <- df_tenure %>% 
+  group_by(ttwa11cd, decile) %>% 
+  summarise(hhld_n = sum(ten_priv)) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(hhld_pct = 100 * hhld_n/sum(hhld_n)) %>% 
+  ungroup()
+
+# share of listings by TTWA, decile, year
+temp1 <- df_z74_decile %>% 
+  group_by(ttwa_size, ttwa, year_fiscal, decile) %>% 
+  summarise(listings_n = sum(count)) %>% 
+  group_by(ttwa_size, ttwa, year_fiscal) %>% 
+  mutate(listings_pct = 100 * listings_n/sum(listings_n)) 
+  
+temp1 %>% 
+  mutate(ttwa_size = factor(ttwa_size, 
+                            levels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"), 
+                            labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"))) %>% 
+  filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+  left_join(temp, by = c('ttwa' = 'ttwa11cd', 'decile' = 'decile')) %>% 
+  ggplot(aes(x = hhld_pct, y = listings_pct, group = ttwa)) +
+  geom_point(colour = "grey40", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", colour = "grey20") +
+  coord_cartesian(ylim = c(0, 50), xlim = c(0, 50)) +
+  facet_grid(year_fiscal ~ ttwa_size)  +
+  theme_minimal(base_size = 14) +
+  labs(x = "\nShare of PRS hhlds in decile (2011 Census)", 
+       y = "Share of listings in decile\n")
+
+# ggsave(here("suburbs paper", "figs", "xxx.jpg"), width = 8, height = 6)
+
+```
+
+Share of TTWA ads per decile vs share of PRS hhlds per decile - by decile and year.
+
+```{r ads v tenure ttwa, fig.height=15, fig.width=15}
+
+# share of PRS hhlds per decile by TTWA, decile
+temp <- df_tenure %>% 
+  group_by(ttwa11cd, decile) %>% 
+  summarise(hhld_n = sum(ten_priv)) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(hhld_pct = 100 * hhld_n/sum(hhld_n)) %>% 
+  ungroup()
+
+# share of listings by TTWA, decile, year
+temp1 <- df_z74_decile %>% 
+  group_by(ttwa_size, ttwa, year_fiscal, decile) %>% 
+  summarise(listings_n = sum(count)) %>% 
+  group_by(ttwa_size, ttwa, year_fiscal) %>% 
+  mutate(listings_pct = 100 * listings_n/sum(listings_n)) 
+  
+temp1 %>% 
+  mutate(ttwa_size = factor(ttwa_size, 
+                            levels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"), 
+                            labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"))) %>% 
+  filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+  left_join(temp, by = c('ttwa' = 'ttwa11cd', 'decile' = 'decile')) %>% 
+  ggplot(aes(x = hhld_pct, y = listings_pct, group = ttwa)) +
+  geom_point(colour = "grey40", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", colour = "grey20") +
+  coord_cartesian(ylim = c(0, 50), xlim = c(0, 50)) +
+  facet_grid(year_fiscal ~ decile)  +
+  theme_minimal(base_size = 14) +
+  labs(x = "\nShare of PRS hhlds in decile (2011 Census)", 
+       y = "Share of listings in decile\n")
+
+# ggsave(here("suburbs paper", "figs", "xxx.jpg"), width = 8, height = 6)
+
+```
+
+Share of TTWA ads per quintile vs share of PRS hhlds per quintile  - by quintile  and year.
+
+```{r ads v tenure ttwa, fig.height=15, fig.width=10}
+
+# share of PRS hhlds per decile by TTWA, decile
+temp <- df_tenure %>% 
+  mutate(quintile = trunc((decile+1)/2, 0)) %>% 
+  group_by(ttwa11cd, quintile) %>% 
+  summarise(hhld_n = sum(ten_priv)) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(hhld_pct = 100 * hhld_n/sum(hhld_n)) %>% 
+  ungroup()
+
+# share of listings by TTWA, decile, year
+temp1 <- df_z74_decile %>% 
+  mutate(quintile = trunc((decile+1)/2, 0)) %>% 
+  group_by(ttwa_size, ttwa, year_fiscal, quintile) %>% 
+  summarise(listings_n = sum(count)) %>% 
+  group_by(ttwa_size, ttwa, year_fiscal) %>% 
+  mutate(listings_pct = 100 * listings_n/sum(listings_n)) 
+  
+temp1 %>% 
+  mutate(ttwa_size = factor(ttwa_size, 
+                            levels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"), 
+                            labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"))) %>% 
+  filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+  left_join(temp, by = c('ttwa' = 'ttwa11cd', 'quintile' = 'quintile')) %>% 
+  ggplot(aes(x = hhld_pct, y = listings_pct, group = ttwa)) +
+  geom_point(colour = "grey40", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", colour = "grey20") +
+  coord_cartesian(ylim = c(0, 50), xlim = c(0, 50)) +
+  facet_grid(year_fiscal ~ quintile)  +
+  theme_minimal(base_size = 14) +
+  labs(x = "\nShare of PRS hhlds in quintile (2011 Census)", 
+       y = "Share of listings in quintile (Zoopla)\n")
+
+## PAPERFIG A1 - new, for appendix
+ggsave(here("suburbs paper", "figs", "Fig A1 resub.jpg"), 
+       width = 20, height = 30, units = 'cm', dpi = 600)
+
+```
+
+```{r ads v tenure ttwa 2, fig.height=4, fig.width=6}
+
+# share of PRS hhlds per decile by TTWA, decile
+temp <- df_tenure %>% 
+  group_by(ttwa11cd, decile) %>% 
+  summarise(hhld_n = sum(ten_priv)) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(hhld_pct = 100 * hhld_n/sum(hhld_n)) %>% 
+  ungroup()
+
+# share of listings by TTWA, decile, year
+temp1 <- df_z74_decile %>% 
+  group_by(ttwa_size, ttwa, year_fiscal, decile) %>% 
+  summarise(listings_n = sum(count)) %>% 
+  group_by(ttwa_size, ttwa, year_fiscal) %>% 
+  mutate(listings_pct = 100 * listings_n/sum(listings_n)) 
+  
+temp1 %>% 
+  mutate(ttwa_size = factor(ttwa_size, 
+                            levels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"), 
+                            labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"))) %>% 
+  filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+  left_join(temp, by = c('ttwa' = 'ttwa11cd', 'decile' = 'decile')) %>% 
+  ggplot(aes(x = hhld_pct, y = listings_pct, group = ttwa)) +
+  geom_point(colour = "grey40", alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", colour = "grey20") +
+  coord_cartesian(ylim = c(0, 50), xlim = c(0, 50)) +
+  facet_wrap( ~ ttwa_size)  +
+  theme_minimal(base_size = 14) +
+  labs(x = "\nShare of PRS hhlds in decile (2011 Census)", 
+       y = "Share of listings in decile\n")
+
+# ggsave(here("suburbs paper", "figs", "xxx.jpg"), width = 8, height = 6)
+
+```
+
+Correlations for share of TTWA ads per decile vs share of PRS hhlds per decile - by TTWA and year.
+
+20 correlations are < 0.6 - from 7 TTWAs
+
+```{r ads v tenure ttwa corr, fig.height=4, fig.width=10}
+
+# share of PRS hhlds per decile by TTWA, decile
+temp <- df_tenure %>% 
+  group_by(ttwa11cd, decile) %>% 
+  summarise(hhld_n = sum(ten_priv)) %>% 
+  group_by(ttwa11cd) %>% 
+  mutate(hhld_pct = 100 * hhld_n/sum(hhld_n)) %>% 
+  ungroup()
+
+# share of listings by TTWA, decile, year
+temp1 <- df_z74_decile %>% 
+  group_by(ttwa_size, ttwa, year_fiscal, decile) %>% 
+  summarise(listings_n = sum(count)) %>% 
+  group_by(ttwa_size, ttwa, year_fiscal) %>% 
+  mutate(listings_pct = 100 * listings_n/sum(listings_n)) 
+  
+temp1 %>% 
+  mutate(ttwa_size = factor(ttwa_size, 
+                            levels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"), 
+                            labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"))) %>% 
+  filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+  left_join(temp, by = c('ttwa' = 'ttwa11cd', 'decile' = 'decile')) %>% 
+  group_by(ttwa_size, ttwa, year_fiscal) %>% 
+  summarise(corr = cor(listings_pct, hhld_pct)) %>% 
+  ggplot(aes(x = factor(year_fiscal), y = corr)) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(0, 1)) +
+  facet_wrap(~ ttwa_size, ncol = 3)
+
+# # details 1
+# temp1 %>% 
+#   mutate(ttwa_size = factor(ttwa_size, 
+#                             levels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"), 
+#                             labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"))) %>% 
+#   filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+#   left_join(temp, by = c('ttwa' = 'ttwa11cd', 'decile' = 'decile')) %>% 
+#   group_by(ttwa_size, ttwa, year_fiscal) %>% 
+#   summarise(corr = cor(listings_pct, hhld_pct)) %>% 
+#   left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+#   filter(corr < 0.6) 
+
+# # details 2
+# length(unique(temp1 %>% 
+#                 mutate(ttwa_size = factor(ttwa_size,
+#                                           levels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"), 
+#                                           labels = c("<100k", "100-250k", "250-750k", "750-1500k", "1500k+"))) %>% 
+#                 filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+#                 left_join(temp, by = c('ttwa' = 'ttwa11cd', 'decile' = 'decile')) %>% 
+#                 group_by(ttwa_size, ttwa, year_fiscal) %>% 
+#                 summarise(corr = cor(listings_pct, hhld_pct)) %>% 
+#                 left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+#                 filter(corr < 0.6) %>% 
+#                 ungroup() %>% 
+#                 pull(ttwa11nm)))
+
+
+```
+
+```{r ads v tenure ttwa size, fig.height=5, fig.width=9}
+
+# share of PRS hhlds per decile by TTWA size
+temp <- df_tenure %>% 
+  group_by(ttwa_size, decile) %>% 
+  summarise(n = sum(ten_priv)) %>% 
+  group_by(ttwa_size) %>% 
+  mutate(pct = 100 * n/sum(n), 
+         type = "households", 
+         year_fiscal = 2011) %>% 
+  ungroup()
+
+# share of listings per decile by TTWA size
+temp1 <- df_z74_decile %>% 
+  group_by(ttwa_size, year_fiscal, decile) %>% 
+  summarise(n = sum(count)) %>% 
+  group_by(ttwa_size, year_fiscal) %>% 
+  mutate(pct = 100 * n/sum(n), 
+         type = "listings") %>% 
+  ungroup()
+
+temp1 %>% 
+  rbind(temp) %>% 
+  filter(ttwa_size != "<100k" & ttwa_size != "100-250k") %>% 
+  ggplot(aes(x = factor(decile), y = pct, group=year_fiscal)) +
+  geom_bar(aes(fill = factor(year_fiscal)), stat = "identity", position = "dodge") +
+  facet_wrap(~ ttwa_size, ncol = 2)
+  
+
+```
+
+Share above/below LHA within each decile.
+
+```{r properties decile 2}
+
+# plots to be added
+df_z74_decile %>% 
+  group_by(ttwa_size, year_fiscal, decile) %>% 
+  summarise(all = sum(count), 
+            below = sum(lcount), 
+            above = sum(acount), 
+            below_pct = 100*below/all, 
+            above_pct = 100*above/all) %>% 
+  pivot_longer(cols = c("below_pct", "above_pct"), 
+               names_to = "count", 
+               values_to = "pct") %>% 
+  filter(count == "below_pct") %>% 
+  ggplot(aes(x = decile, y = pct, group = year_fiscal)) +
+  geom_line(aes(colour = as.factor(year_fiscal))) +
+  coord_cartesian(ylim = c(0,30)) +
+  facet_wrap(~ ttwa_size)
+
+```
+
+
+```{r properties decile 2b}
+
+# plots to be added
+df_z74_decile %>% 
+  group_by(ttwa_size, decile) %>% 
+  summarise(all = sum(count), 
+            below = sum(lcount), 
+            above = sum(acount), 
+            below_pct = 100*below/all, 
+            above_pct = 100*above/all) %>% 
+  pivot_longer(cols = c("below_pct", "above_pct"), 
+               names_to = "count", 
+               values_to = "pct") %>% 
+  filter(count == "below_pct") %>% 
+  ggplot(aes(x = decile, y = pct, group = count)) +
+  geom_line() +
+  coord_cartesian(ylim = c(0,30)) +
+  facet_wrap(~ ttwa_size)
+
+```
+
+Share of TTWA properties above/below LHA by decile. 
+
+```{r properties decile 3}
+
+# plots to be added
+df_z74_decile %>% 
+  group_by(decile) %>% 
+  summarise(all = sum(count), 
+            below = sum(lcount), 
+            above = sum(acount)) %>% 
+  ungroup() %>% 
+  mutate(all_pct = 100*all/sum(all),
+         below_pct = 100*below/sum(below), 
+         above_pct = 100*above/sum(above)) %>% 
+  pivot_longer(cols = c("all_pct", "below_pct", "above_pct"), 
+               names_to = "count", 
+               values_to = "share") %>% 
+  mutate(count = factor(count, levels = c("all_pct", "above_pct", "below_pct"))) %>% 
+  # filter(count == "below_pct" | count == "above_pct") %>% 
+  ggplot(aes(x = decile, y = share, group = count)) +
+  geom_bar(aes(fill = count), stat = "identity", position = "dodge")
+
+```
+
+## Properties below LHA
+
+```{r below lha year}
+
+# % below LHA by year - table
+df_z74 %>% 
+  group_by(year_fiscal) %>% 
+  summarise(pct = sum(lowlha)/n()) 
+
+# fig - equiv to "old_fig7_74TTWA.tiff"
+df_z74 %>% 
+  group_by(year_fiscal) %>% 
+  summarise(pct = sum(lowlha)/n()) %>% 
+  ggplot(aes(x = year_fiscal, y = pct)) +
+  geom_line()
+
+```
+
+
+```{r below lha year size}
+
+# fig by sizes
+df_z74 %>% 
+  group_by(beds, year_fiscal) %>% 
+  summarise(pct = sum(lowlha, na.rm = TRUE)/n()) %>% 
+  ggplot(aes(x = year_fiscal, y = pct, group = factor(beds))) +
+  geom_line(aes(colour = factor(beds))) +
+  coord_cartesian(ylim = c(0,.3)) +
+  theme_minimal()
+
+```
+
+
+```{r below lha brma}
+
+# fig by brmas
+df_z74 %>% 
+  group_by(brma, year_fiscal) %>% 
+  summarise(pct = sum(lowlha, na.rm = TRUE)/n()) %>% 
+  ggplot(aes(x = factor(year_fiscal), y = pct, fill = factor(year_fiscal))) +
+  geom_boxplot() +
+  geom_jitter(colour = "darkgrey", size = 0.4, alpha = 0.8) +
+  geom_hline(yintercept = 0.3, linetype = "dashed") +
+  theme_minimal()
+
+```
+
+
+```{r below lha brma size, fig.height=6, fig.width=8}
+
+# fig by brmas and size
+df_z74 %>% 
+  group_by(beds, brma, year_fiscal) %>% 
+  summarise(pct = sum(lowlha, na.rm = TRUE)/n()) %>% 
+  ggplot(aes(x = factor(year_fiscal), y = pct, fill = factor(year_fiscal))) +
+  geom_boxplot() +
+  geom_jitter(colour = "darkgrey", size = 0.4, alpha = 0.8) +
+  geom_hline(yintercept = 0.3, linetype = "dashed") +
+  facet_wrap(~ beds) +
+  theme_minimal()
+
+```
+
+
+## LHA quartile summary
+
+```{r}
+
+df_z74_decile %>% 
+  mutate(quintile = factor(case_when(decile <= 2 ~ 1, 
+                                     TRUE ~ 2), 
+                           levels = c(1,2), 
+                           labels = c("Quintile 1", "Quintile 2-5"))) %>% 
+  group_by(ttwa_size, year_fiscal, quintile) %>% 
+  summarise(count = sum(count), 
+            lcount = sum(lcount), 
+            acount = sum(acount)) %>% 
+  group_by(ttwa_size, year_fiscal) %>% 
+  mutate(lha_below = round(100 * lcount/sum(lcount), 1), 
+         lha_above = round(100 * acount/sum(acount), 1)) %>% 
+  filter(quintile == "Quintile 1" & 
+           (year_fiscal == 2012 | year_fiscal == 2019)) %>% 
+  select(ttwa_size, year_fiscal, lha_below, lha_above)
+         
+
+```
+
+
+## RCI measure
+
+```{r rci yearly}
+
+# 
+df_z74_rci %>% 
+  ggplot(aes(x = year_fiscal, y = rci, group = ttwa)) +
+  # geom_line(color="darkgrey",size=0.5, alpha = 0.5) + 
+  geom_hline(yintercept = 0, colour = "grey") +
+  geom_smooth(se = FALSE, color="darkgrey", linewidth = 0.5, alpha = 0.5) +
+  facet_wrap(~ ttwa_size) +
+  scale_y_continuous(breaks=seq(-0.5, 0.5, by = 0.2)) +
+  theme_minimal(base_size = 14) +
+  labs(title = "RCI by year and size", 
+       x = "Population (log 10)", 
+       y = "RCI") 
+
+
+```
+
+
+```{r rci 2012}
+
+# 
+df_z74_rci %>% 
+  filter(year_fiscal == 2012) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = rci)) +
+  geom_point(color="#0072B2",size=0.9) + 
+  geom_hline(yintercept = 0, colour = "grey30") +
+  geom_smooth(fill = "0072B2", se = FALSE) +
+  scale_y_continuous(breaks=seq(-0.5, 0.5, by = 0.2)) +
+  theme_minimal(base_size = 14) +
+  labs(#title = "RCI in 2012", 
+       x = "\nPopulation (log 10)", 
+       y = "RCI\n") 
+
+```
+
+
+```{r rci 2012 2013}
+
+# remakes this one: "old_fig9_logpopulation_version1.tiff"
+df_z74_rci %>% 
+  filter(year_fiscal <= 2013) %>% 
+  group_by(ttwa) %>% 
+  summarise(rci = mean(rci), 
+            ttwa_popln = mean(ttwa_popln)) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = rci)) +
+  geom_point(color="#0072B2",size=0.9) + 
+  geom_hline(yintercept = 0, colour = "grey30") +
+  geom_smooth(fill = "0072B2", se = FALSE) +
+  scale_y_continuous(breaks=seq(-0.5, 0.5, by = 0.2)) +
+  theme_minimal(base_size = 14) +
+  labs(# title = "RCI in 2012+2013", 
+       x = "\nPopulation (log 10)", 
+       y = "RCI\n") 
+
+
+```
+
+RCI change vs popln (1 yr)
+
+```{r rci change}
+
+#  
+df_z74_rci %>% 
+  pivot_wider(names_from = year_fiscal, names_prefix = "rci",
+              values_from = rci) %>% 
+  mutate(rci_change = rci2019 - rci2012) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = rci_change)) +
+  geom_point(color="#0072B2",size=0.9) + 
+  geom_hline(yintercept = 0, colour = "grey") +
+  geom_smooth(fill = "0072B2", se = FALSE) +
+  coord_cartesian(ylim = c(-.24, .42)) +
+  theme_minimal(base_size = 14) +
+  labs(title = "RCI change", 
+       x = "\nPopulation (log 10)", 
+       y = "RCI\n") 
+
+```
+
+RCI change (two year)
+
+```{r rci change 2}
+
+# remakes this one: newdraft_figure3_old_fig10_version2.tiff
+# this is the original version of fig3 in the paper
+df_z74_rci %>% 
+  pivot_wider(names_from = year_fiscal, names_prefix = "rci",
+              values_from = rci) %>% 
+  mutate(rci_1213 = (rci2012 + rci2013)/2, 
+         rci_1819 = (rci2018 + rci2019)/2, 
+         rci_change = (rci_1819 - rci_1213)) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = rci_change)) +
+  geom_point(color="#0072B2",size=0.9) + 
+  geom_hline(yintercept = 0, colour = "grey") +
+  geom_smooth(fill = "0072B2", se = FALSE) +
+  coord_cartesian(ylim = c(-.24, .42)) +
+  theme_minimal(base_size = 14) +
+  labs(#title = "Popln vs RCI change", 
+       x = "\nPopulation (log 10)", 
+       y = "RCI\n") 
+
+
+```
+
+2012+13 vs 2018+19 (two year)
+
+```{r rci start vs end}
+
+# remakes this one: newdraft_figure3_old_fig10_version2.tiff
+# this is the new version of fig3 in the paper
+df_z74_rci %>% 
+  pivot_wider(names_from = year_fiscal, names_prefix = "rci",
+              values_from = rci) %>% 
+  mutate(rci_1213 = (rci2012 + rci2013)/2, 
+         rci_1819 = (rci2018 + rci2019)/2, 
+         rci_change = (rci_1819 - rci_1213)) %>% 
+  ggplot(aes(x = rci_1213, y = rci_1819, group = ttwa_size)) +
+  geom_point(aes(shape = ttwa_size), colour = "grey30", size=2.5) + 
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_vline(xintercept = 0, colour = "grey50") +
+  geom_abline(intercept = 0, slope = 1, colour = "grey40", linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(#title = "RCI start vs RCI end", 
+       x = "\nRCI 2012-14", 
+       y = "RCI 2018-20\n", 
+       shape = "TTWA size") 
+
+ggsave(here("suburbs paper", "figs", "Fig 3 resub.jpg"), 
+       width = 20, height = 15, units = "cm", dpi = 600)
+
+```
+
+Start vs change (two year)
+
+```{r rci start vs change}
+
+# remakes this one: newdraft_figure3_old_fig10_version2.tiff
+df_z74_rci %>% 
+  pivot_wider(names_from = year_fiscal, names_prefix = "rci",
+              values_from = rci) %>% 
+  mutate(rci_1213 = (rci2012 + rci2013)/2, 
+         rci_1819 = (rci2018 + rci2019)/2, 
+         rci_change = (rci_1819 - rci_1213)) %>% 
+  ggplot(aes(x = rci_1213, y = rci_change, group = ttwa_size)) +
+  geom_point(aes(colour = ttwa_size),size=0.9) + 
+  geom_hline(yintercept = 0, colour = "grey") +
+  theme_minimal(base_size = 14) +
+  labs(#title = "RCI start vs change", 
+       x = "\nRCI 2012/13-2013/14", 
+       y = "RCI change\n") 
+
+```
+
+
+## Linear regression
+
+https://tim-tiefenbach.de/post/2023-dplyr-many-models/
+https://r4ds.had.co.nz/many-models.html 
+
+### Rents: Single national model
+
+```{r lm all decile cont}
+
+lm_all <- lm(price_log ~ decile + yearc + factor(beds) +
+               decile*yearc, 
+             data = df_z74)
+summary(lm_all)
+
+```
+
+
+```{r lm all decile factor}
+
+lm_all <- lm(price_log ~ factor(decile) + yearc + factor(beds) +
+               decile*yearc, 
+             data = df_z74)
+summary(lm_all)
+
+```
+
+## LM many models
+
+### Rents: Basic
+Linear decile term
+
+```{r lm many decile cont}
+
+# create nested version - list of dfs, identified by ttwa
+# NB nest_by(x) preferred over group_by(x) %>% nest()
+df_z74_nested <- df_z74 %>% 
+  ungroup() %>% 
+  nest_by(ttwa)
+
+
+# model formula - basic (linear decile)
+model_formula <- price_log ~ decile + yearc + factor(beds) + decile*yearc
+
+
+# model results as nested list
+df_z74_nested_basic_res <- df_z74_nested %>% 
+  mutate(mod = list(lm(model_formula, data = data)),
+         modstat = list(broom::glance(mod)),
+         res = list(broom::tidy(mod)))
+
+
+# # extract model stats by TTWA
+# df_z74_nested_basic_res  %>% 
+#   select(ttwa, modstat) %>% 
+#   unnest(modstat) 
+
+
+# # extract model coeffs by TTWA
+# df_z74_nested_basic_res  %>% 
+#   select(ttwa, res) %>% 
+#   unnest(res) 
+
+
+# plot decile coeffs
+df_z74_nested_basic_res  %>% 
+  select(ttwa, res) %>% 
+  unnest(res) %>% 
+  filter(term == "decile") %>% 
+  mutate(sig01 = (p.value < .01), 
+         lci = estimate - (1.95 * std.error),
+         uci = estimate + (1.95 * std.error)) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = estimate)) +
+  geom_hline(yintercept = 0, colour = "grey30") +
+  geom_linerange(aes(ymin = lci, ymax = uci), colour = "grey50") +
+  geom_point(size = 2, colour = "grey40") +
+  geom_smooth(fill = "0072B2", se = FALSE) + 
+  theme_minimal(base_size = 14) +
+  labs(x = "\nTTWA population (log.10)", 
+       y = "Coefficient of decile of distance\n",
+       shape = "Signif. < .01")
+
+ggsave(here("suburbs paper", "figs", "Fig 1 resub.jpg"), 
+       width = 20, height = 15, units = "cm", dpi = 600)
+  
+```
+
+```{r decile x year}
+
+# plot decile coeffs
+df_z74_nested_basic_res  %>% 
+  select(ttwa, res) %>% 
+  unnest(res) %>% 
+  filter(term == "decile:yearc") %>% 
+  mutate(sig01 = (p.value < .01), 
+         lci = estimate - (1.95 * std.error),
+         uci = estimate + (1.95 * std.error)) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = estimate)) +
+  geom_hline(yintercept = 0, colour = "grey30") +
+  geom_linerange(aes(ymin = lci, ymax = uci), colour = "grey50") +
+  geom_point(size = 2, colour = "grey40") +
+  geom_smooth(fill = "0072B2", se = FALSE) + 
+  coord_cartesian(ylim = c(-.002, .003)) +
+  theme_minimal(base_size = 14) +
+  labs(x = "\nTTWA population (log.10)", 
+       y = "Coefficient of interaction term\n",
+       shape = "Signif. < .01")
+
+ggsave(here("suburbs paper", "figs", "Fig 2 resub.jpg"), 
+       width = 20, height = 15, units = "cm", dpi = 600)
+
+```
+
+```{r decile x year list}
+
+# plot decile coeffs
+df_z74_nested_basic_res  %>% 
+  select(ttwa, res) %>% 
+  unnest(res) %>% 
+  filter(term == "decile:yearc") %>% 
+  mutate(sig01 = (p.value < .01), 
+         lci = estimate - (1.95 * std.error),
+         uci = estimate + (1.95 * std.error)) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  select(ttwa, ttwa11nm, ttwa_size, estimate) %>% 
+  mutate(estimate = round(estimate, 4)) %>% 
+  arrange(estimate)
+
+
+```
+
+Plot decile coeffs by size
+
+```{r decile 1, fig.height=4, fig.width=6}
+
+# extract model coeffs by TTWA
+df_z74_nested_basic_res  %>%
+  select(ttwa, res) %>%
+  unnest(res) %>% 
+  filter(grepl("decile", term) & !grepl("yearc", term)) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  ggplot(aes(x = reorder(ttwa, desc(ttwa_popln)), y = estimate)) +
+  geom_bar(stat = "identity") 
+
+```
+
+Summarise decile by region
+
+```{r decile year region, fig.height=3.5, fig.width=6}
+
+df_z74_nested_basic_res  %>%
+  select(ttwa, res) %>%
+  unnest(res) %>% 
+  filter(grepl("decile", term) & !grepl("yearc", term)) %>% 
+  left_join(df_ttwa, by = c("ttwa" = "ttwa11cd")) %>% 
+  select(ttwa, rgn, estimate) %>% 
+  ggplot(aes(x = rgn, y = estimate)) +
+  geom_hline(yintercept = 0, colour = 'grey30') +
+  geom_boxplot(aes(colour = rgn), alpha = 0.4) +
+  geom_jitter(colour = 'grey50', width = .2)  + 
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  labs(x = "\nRegion", 
+       y = "Coefficient of interaction term\n",
+       colour = "")
+
+# ggsave(here("suburbs paper", "figs", "Fig new boxplot resub.jpg"), width = 8, height = 5)
+
+
+```
+
+Summarise decile x year by region
+
+```{r decile year region, fig.height=3.5, fig.width=6}
+
+df_z74_nested_basic_res  %>%
+  select(ttwa, res) %>%
+  unnest(res) %>% 
+  filter(term == "decile:yearc") %>% 
+  left_join(df_ttwa, by = c("ttwa" = "ttwa11cd")) %>% 
+  select(ttwa, rgn, estimate) %>% 
+  ggplot(aes(x = rgn, y = estimate)) +
+  geom_hline(yintercept = 0, colour = 'grey30') +
+  geom_boxplot(aes(colour = rgn), alpha = 0.4) +
+  geom_jitter(colour = 'grey50', width = .2)  + 
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  labs(x = "\nRegion", 
+       y = "Coefficient of interaction term\n",
+       colour = "")
+
+ggsave(here("suburbs paper", "figs", "Fig new boxplot resub.jpg"), width = 8, height = 5)
+
+
+```
+
+Summarise decile x year by starting point (const)
+
+```{r decile year region, fig.height=3.5, fig.width=6}
+
+df_z74_nested_basic_res  %>%
+  select(ttwa, res) %>%
+  unnest(res) %>% 
+  ungroup() %>% 
+  select(ttwa, term, estimate) %>% 
+  filter(ttwa != "S22000047") %>%   #drop Aberdeen
+  filter(term == "decile:yearc" | term == "(Intercept)") %>% 
+  pivot_wider(names_from = "term", values_from = "estimate") %>% 
+  rename(intercept = `(Intercept)`,
+         interaction = `decile:yearc`) %>% 
+  left_join(df_ttwa, by = c("ttwa" = "ttwa11cd")) %>% 
+  select(ttwa, rgn, intercept, interaction) %>% 
+  mutate(rgn2 = case_when(rgn %in% c("NE", "NW", "WM", "SW", "Sc", "Wa") ~ 1, 
+                         TRUE ~ 2)) %>% 
+  ggplot(aes(x = intercept, y = interaction, group = rgn2)) +
+  geom_point(aes(colour = factor(rgn2))) +
+  geom_smooth(se= FALSE) +
+  theme_minimal(base_size = 14) +
+  labs(x = "\nIntercept", 
+       y = "Interaction\n",
+       colour = "Region")
+
+
+```
+
+### Rents: Decile dummies
+Decile as dummies + linear term
+
+```{r lm many decile cont}
+
+# create nested version - list of dfs, identified by ttwa
+# NB nest_by(x) preferred over group_by(x) %>% nest()
+df_z74_nested <- df_z74 %>% 
+  ungroup() %>% 
+  nest_by(ttwa)
+
+
+# model formula - basic (linear decile)
+model_formula <- price_log ~ factor(decile) + yearc + factor(beds) + decile*yearc
+
+
+# model results as nested list
+df_z74_nested_dummies_res <- df_z74_nested %>% 
+  mutate(mod = list(lm(model_formula, data = data)),
+         modstat = list(broom::glance(mod)),
+         res = list(broom::tidy(mod)))
+
+
+# # extract model stats by TTWA
+# df_z74_nested_dummies_res  %>% 
+#   select(ttwa, modstat) %>% 
+#   unnest(modstat) 
+
+
+# # extract model coeffs by TTWA
+# df_z74_nested_dummies_res  %>% 
+#   select(ttwa, res) %>% 
+#   unnest(res) 
+
+# can't plot decile coeffs as absorbed by dummy terms
+
+# plot decile.year coeffs - alt
+df_z74_nested_dummies_res  %>% 
+  select(ttwa, res) %>% 
+  unnest(res) %>% 
+  filter(term == "yearc:decile") %>% 
+  mutate(sig01 = (p.value < .01), 
+         lci = estimate - (1.95 * std.error),
+         uci = estimate + (1.95 * std.error)) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  ggplot(aes(x = log10(ttwa_popln), y = estimate)) +
+  geom_hline(yintercept = 0, colour = "grey30") +
+  geom_linerange(aes(ymin = lci, ymax = uci), colour = "grey50") +
+  geom_point(size = 2, colour = "grey40") +
+  geom_smooth(fill = "0072B2", se = FALSE) + 
+  coord_cartesian(ylim = c(-.002, .003)) +
+  theme_minimal(base_size = 14) +
+  labs(x = "\nTTWA population (log.10)", 
+       y = "Coefficient of interaction term\n",
+       shape = "Signif. < .01")
+
+# ggsave(here("suburbs paper", "figs", "Fig2 alt resub.jpg"), 
+#        width = 20, height = 15, units = "cm", dpi = 600)
+
+  
+```
+
+Plot decile coeffs
+
+```{r dummies 1, fig.height=8, fig.width=8}
+
+# extract model coeffs by TTWA
+df_z74_nested_dummies_res  %>%
+  select(ttwa, res) %>%
+  unnest(res) %>% 
+  filter(grepl("factor\\(decile\\)", term)) %>% 
+  mutate(term = as.numeric(gsub("factor\\(decile\\)", "", term))) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  ggplot(aes(x = reorder(ttwa, desc(ttwa_popln)), y = estimate, group = factor(term))) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ term, ncol = 2)
+    
+
+
+```
+
+```{r dummies 2, fig.height=5, fig.width=5}
+
+# extract model coeffs by TTWA
+df_z74_nested_dummies_res  %>%
+  select(ttwa, res) %>%
+  unnest(res) %>% 
+  filter(grepl("factor\\(decile\\)", term)) %>% 
+  mutate(term = as.numeric(gsub("factor\\(decile\\)", "", term))) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  ggplot(aes(x = factor(term), y = estimate)) +
+  geom_boxplot() 
+    
+```
+As previous, groups by TTWA size
+```{r dummies 3, fig.height=6, fig.width=6}
+
+# extract model coeffs by TTWA
+df_z74_nested_dummies_res  %>%
+  select(ttwa, res) %>%
+  unnest(res) %>% 
+  filter(grepl("factor\\(decile\\)", term)) %>% 
+  mutate(term = as.numeric(gsub("factor\\(decile\\)", "", term))) %>% 
+  left_join(df_ttwa, by = c('ttwa' = 'ttwa11cd')) %>% 
+  ggplot(aes(x = factor(term), y = estimate)) +
+  geom_boxplot() +
+  facet_wrap(~ ttwa_size)
+    
+```
+
+Compare results of the two models (i.e. decile.year interaction terms). Correlation 0.97!
+
+```{r lm many compare}
+
+# plot decile.year coeffs - alt
+temp <- df_z74_nested_basic_res  %>% 
+  select(ttwa, res) %>% 
+  unnest(res) %>% 
+  filter(term == "decile:yearc") %>% 
+  select(ttwa, estimate) %>% 
+  cbind(df_z74_nested_dummies_res  %>% 
+          select(ttwa, res) %>% 
+          unnest(res) %>% 
+          filter(term == "yearc:decile") %>% 
+          select(ttwa, estimate) %>% 
+          rename(ttwa2 = ttwa, estimate2 = estimate)) %>% 
+  ungroup() %>% 
+  select(estimate, estimate2)
+correlations(temp)
+  
+```
+
+```{r r sq compare}
+
+# extract model stats by TTWA - mean adj.r.sq
+df_z74_nested_basic_res  %>%
+  select(ttwa, modstat) %>%
+  unnest(modstat) %>% 
+  select(ttwa, adj.r.squared) %>% 
+  mutate(model = "basic") %>% 
+  rbind(df_z74_nested_dummies_res  %>%
+          select(ttwa, modstat) %>%
+          unnest(modstat) %>% 
+          select(ttwa, adj.r.squared) %>% 
+          mutate(model = "dummies")) %>% 
+  group_by(model) %>% 
+  summarise(mean_adjrsq = mean(adj.r.squared))
+
+
+# extract model stats by TTWA
+df_z74_nested_basic_res  %>%
+  select(ttwa, modstat) %>%
+  unnest(modstat) %>% 
+  select(ttwa, adj.r.squared) %>% 
+  cbind(df_z74_nested_dummies_res  %>%
+          select(ttwa, modstat) %>%
+          unnest(modstat) %>% 
+          select(ttwa, adj.r.squared) %>% 
+          rename(ttwa2=ttwa, adj.r.squared2 = adj.r.squared)) %>% 
+  ggplot(aes(x = adj.r.squared, y = adj.r.squared2)) + 
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1)
+
+
+```
+
