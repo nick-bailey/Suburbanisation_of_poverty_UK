@@ -1,8 +1,8 @@
 # Suburbanisation_of_poverty_UK
-Repository for code used in paper on 'Housing and welfare reform, and the suburbanisation of poverty in UK cities, 2011-20'. The analysis is in two parts covering private rental listings data and Housing Benefit claims data. 
+Repository for code used in paper on 'Housing and welfare reform, and the suburbanisation of poverty in UK cities, 2011-20', published in _Housing Studies_ journal (https://doi.org/10.1080/02673037.2023.2266398). The analysis is in two parts covering private rental listings data and Housing Benefit claims data. 
 
 ## Private rental sector listings data (Zoopla plc)
-These data are accessed under licence from the Urban Big Data Centre (www.ubdc.ac.uk). Other UK-based academics can access the data there while the licence remains current. The code to produce Figures 1-3 in the paper is here: '[PRS and suburbs - Zoopla data - resub.Rmd](https://github.com/nick-bailey/Suburbanisation_of_poverty_UK/blob/main/PRS%20and%20suburbs%20-%20Zoopla%20data%20-%20resub.Rmd)'.
+These data are accessed under licence from the Urban Big Data Centre (www.ubdc.ac.uk). Other UK-based academics can access the data there while the licence remains current. The code to produce Figures 1-3 in the paper is here: '[PRS and suburbs - Zoopla data - resub2.Rmd](https://github.com/nick-bailey/Suburbanisation_of_poverty_UK/blob/main/PRS%20and%20suburbs%20-%20Zoopla%20data%20-%20resub2.Rmd)'.
 
 In addition to open datasets noted in the code (postcode to higher area lookups; small area population data), there are a number of other inputs used in the analysis: 
 * postcode to Broad Rental Market Areas (BRMAs) lookup: https://github.com/nick-bailey/Postcode-to-BRMA-lookup
