@@ -1,7 +1,7 @@
 ---
 title:  "PRS and Suburbanisation of Poverty - HBen data - v6"
 author: "Nick Bailey"
-date:   "07/01/2022"
+date:   "07/10/2023"
 output:
   html_document: 
     code_folding: hide
@@ -18,6 +18,9 @@ Various approaches to measuring centrality are used but the main one is a modifi
 
 ```{r setup}
 # knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# first time only
+# install.packages('pacman')
 
 # load packages
 pacman::p_load(feather, here, sf, tidyverse, readxl, ggrepel, GGally, ggridges)
@@ -1416,6 +1419,159 @@ ggsave(here("figs", "Fig 6 resub.jpg"),
 
 ```
 
+Make second figure for blog showing change in nos of HB hhds by inner city vs rest - ten largest cities.
+
+```{r blog fig}
+
+# biggest 10 ex. slough/heathrow
+names_10 <- df_hb11 %>% 
+  select(ttwa11nm, ttwa_popln) %>% 
+  group_by(ttwa11nm) %>% 
+  slice(1) %>% 
+  filter(ttwa_popln > 800000) %>% 
+  arrange(desc(ttwa_popln)) %>% 
+  filter(ttwa11nm != 'Slough and Heathrow') %>% 
+  pull(ttwa11nm)
+names_10 <- names_10[1:10]
+
+# # check calcs
+# df_hb11 %>% 
+#   filter(ttwa11nm %in% names_10 & 
+#            (year == 2011 | year == 2019) & 
+#            tenure == "private") %>% 
+#   group_by(ttwa11nm, ttwa_popln, year) %>% 
+#   mutate(decile = trunc(10 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>% 
+#   mutate(inner = factor((decile <= 2), 
+#                         levels = c(TRUE, FALSE), 
+#                         labels = c('Inner city', 'Rest'))) %>% 
+#   group_by(ttwa11nm, ttwa_popln, year, inner) %>% 
+#   summarise(claimants = sum(claimants, na.rm = TRUE)) %>% 
+#   pivot_wider(names_from = 'year', names_prefix = 'yr', values_from = 'claimants') %>% 
+#   mutate(change = 100 * (yr2019/yr2011 - 1), 
+#          change_n = yr2019 - yr2011) %>% 
+#   select(-yr2011, -yr2019)
+  
+df_hb11 %>% 
+  filter(ttwa11nm %in% names_10 & 
+           (year == 2011 | year == 2019) & 
+           tenure == "private") %>% 
+  group_by(ttwa11nm, ttwa_popln, year) %>% 
+  mutate(decile = trunc(10 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>% 
+  mutate(inner = factor((decile <= 2), 
+                        levels = c(TRUE, FALSE), 
+                        labels = c('Inner city', 'Rest'))) %>% 
+  group_by(ttwa11nm, ttwa_popln, year, inner) %>% 
+  summarise(claimants = sum(claimants, na.rm = TRUE)) %>% 
+  pivot_wider(names_from = 'year', names_prefix = 'yr', values_from = 'claimants') %>% 
+  mutate(change = 100 * (yr2019/yr2011 - 1), 
+         change_n = yr2019 - yr2011) %>% 
+  ggplot(aes(x = reorder(ttwa11nm, ttwa_popln), y = change, fill = inner)) +
+  geom_bar(position = 'dodge', stat = 'identity') + 
+  coord_flip() +
+  theme_minimal(base_size = 14) + 
+  scale_fill_manual(values = cbPalette)+
+  labs(# title = 'Percent change in HB households in the PRS - 2011 to 2019\n',
+       x = '', 
+       y = '\nPecent change in HB households in PRS',
+       fill = '')
+
+ggsave(here("figs", "fig blog 2.jpg"), 
+       width = 15, height = 10, units = 'cm', dpi = 300)
+
+```
+
+Make calc for counterfactual - no. PRS hhlds missing from inner city - ten largest cities.
+
+```{r blog fig2}
+
+# change in HB for outer
+temp <- df_hb11 %>%
+  filter(ttwa11nm %in% names_10 &
+           (year == 2011 | year == 2019) &
+           tenure == "private") %>%
+  group_by(ttwa11nm, ttwa_popln, year) %>%
+  mutate(decile = trunc(10 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>%
+  mutate(inner = factor((decile <= 2),
+                        levels = c(TRUE, FALSE),
+                        labels = c('Inner city', 'Rest'))) %>%
+  group_by(ttwa11nm, ttwa_popln, year, inner) %>%
+  summarise(claimants = sum(claimants, na.rm = TRUE)) %>%
+  pivot_wider(names_from = 'year', names_prefix = 'yr', values_from = 'claimants') %>%
+  mutate(change_rest = 100 * (yr2019/yr2011 - 1)) %>% 
+  arrange(desc(ttwa_popln)) %>% 
+  filter(inner == 'Rest') %>% 
+  ungroup() %>% 
+  select(ttwa11nm, change_rest)
+
+# change in HB for inner if matched rate of change for outer  
+(temp1 <- df_hb11 %>%
+  filter(ttwa11nm %in% names_10 &
+           (year == 2011 | year == 2019) &
+           tenure == "private") %>%
+  group_by(ttwa11nm, ttwa_popln, year) %>%
+  mutate(decile = trunc(10 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>%
+  mutate(inner = factor((decile <= 2),
+                        levels = c(TRUE, FALSE),
+                        labels = c('Inner city', 'Rest'))) %>%
+  group_by(ttwa11nm, ttwa_popln, year, inner) %>%
+  summarise(claimants = sum(claimants, na.rm = TRUE)) %>%
+  pivot_wider(names_from = 'year', names_prefix = 'yr', values_from = 'claimants') %>%
+  mutate(change_obs = 100 * (yr2019/yr2011 - 1), 
+         change_obs_n = round((yr2019 - yr2011),0)) %>% 
+  arrange(desc(ttwa_popln)) %>% 
+  select(-ttwa_popln) %>% 
+  filter(inner == 'Inner city') %>% 
+  left_join(temp, by = 'ttwa11nm') %>% 
+  mutate(change_pred_n = round(yr2011 * (change_rest/100),0), 
+         change_diff_n = change_obs_n - change_pred_n,
+         change_diff = 100 * change_diff_n/yr2011))
+
+```
+
+Total number HB hhlds missing from inner cities
+
+```{r blog fig3}
+
+temp <- df_hb11 %>%
+  filter(ttwa11nm %in% names_10 &
+           (year == 2011 | year == 2019) &
+           tenure == "private") %>%
+  group_by(ttwa11nm, ttwa_popln, year) %>%
+  mutate(decile = trunc(10 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>%
+  mutate(inner = factor((decile <= 2),
+                        levels = c(TRUE, FALSE),
+                        labels = c('Inner city', 'Rest'))) %>%
+  group_by(year, inner) %>%
+  summarise(claimants = sum(claimants, na.rm = TRUE)) %>%
+  pivot_wider(names_from = 'year', names_prefix = 'yr', values_from = 'claimants') %>%
+  mutate(change_rest = 100 * (yr2019/yr2011 - 1)) %>% 
+  filter(inner == 'Rest') %>% 
+  ungroup() %>% 
+  select(change_rest)
+
+(df_hb11 %>%
+  filter(ttwa11nm %in% names_10 &
+           (year == 2011 | year == 2019) &
+           tenure == "private") %>%
+  group_by(ttwa11nm, ttwa_popln, year) %>%
+  mutate(decile = trunc(10 * rank_dist2/((max(rank_dist2) + 1))) + 1) %>%
+  mutate(inner = factor((decile <= 2),
+                        levels = c(TRUE, FALSE),
+                        labels = c('Inner city', 'Rest'))) %>%
+  group_by(year, inner) %>%
+  summarise(claimants = sum(claimants, na.rm = TRUE)) %>%
+  pivot_wider(names_from = 'year', names_prefix = 'yr', values_from = 'claimants') %>%
+  mutate(change_obs = 100 * (yr2019/yr2011 - 1), 
+         change_obs_n = round((yr2019 - yr2011),0)) %>% 
+  filter(inner == 'Inner city') %>% 
+  cbind(temp) %>% 
+  mutate(change_pred_n = round(yr2011 * (change_rest/100),0), 
+         change_diff_n = change_obs_n - change_pred_n,
+         change_diff = 100 * change_diff_n/yr2011))
+
+```
+
+
 ```{r, fig.height=4, fig.width=8}
 
 temp <- df_hb11 %>% 
@@ -1438,16 +1594,6 @@ temp %>%
   filter(quintile == 1) %>% 
   ggplot(aes(x = share_change_pct)) +
   geom_histogram()
-
-#(colour = cbPalette[1], alpha = .75) +
-  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') +
-  facet_wrap( ~ tenure) +
-  coord_cartesian(ylim = c(0,50), xlim = c(0,50)) +
-  labs(# title = "Share of HB claims in Quintile 1",
-       x = "\nShare in 2011", 
-       y = "Share in 2019\n") +
-  theme_minimal()
-  
 
 
 ```
